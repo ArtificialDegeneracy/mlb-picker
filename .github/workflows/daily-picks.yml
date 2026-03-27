@@ -44,12 +44,18 @@ jobs:
         run: |
           # Download DB artifact from previous run if it exists
           gh run download --name mlb-picker-db --dir . 2>/dev/null || echo "No previous DB found, starting fresh"
+          ls -la mlb_picker.db 2>/dev/null || echo "No DB file after restore"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Initialize (first run only)
-        if: ${{ !hashFiles('mlb_picker.db') }}
-        run: python main.py init
+        run: |
+          if [ ! -f mlb_picker.db ]; then
+            echo "No database found — running init..."
+            python main.py init
+          else
+            echo "Database restored from artifact, skipping init"
+          fi
 
       - name: Determine run mode
         id: mode
@@ -67,6 +73,9 @@ jobs:
 
       - name: Run scheduler
         run: python scheduler.py ${{ steps.mode.outputs.mode }}
+
+      - name: Regenerate dashboard for today
+        run: python -c "from output.dashboard import generate_dashboard; from datetime import datetime; generate_dashboard(datetime.now().strftime('%Y-%m-%d'))"
 
       - name: Save database artifact
         uses: actions/upload-artifact@v4
