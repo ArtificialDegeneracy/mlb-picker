@@ -47,9 +47,20 @@ jobs:
       - name: Restore database and model
         run: |
           # Download artifacts from previous run if they exist
-          gh run download --name mlb-picker-db --dir . 2>/dev/null || echo "No previous DB found"
-          gh run download --name mlb-picker-model --dir . 2>/dev/null || echo "No previous model found"
-          ls -la mlb_picker.db model/trained_model.pkl 2>/dev/null || echo "Some files missing after restore"
+          # gh run download extracts into a subdirectory named after the artifact
+          gh run download --name mlb-picker-db --dir /tmp/db-restore 2>/dev/null && \
+            cp /tmp/db-restore/mlb_picker.db . 2>/dev/null && \
+            echo "DB restored" || echo "No previous DB found"
+
+          gh run download --name mlb-picker-model --dir /tmp/model-restore 2>/dev/null && \
+            cp /tmp/model-restore/model/trained_model.pkl model/ 2>/dev/null && \
+            cp /tmp/model-restore/model/scaler.pkl model/ 2>/dev/null && \
+            echo "Model restored" || echo "No previous model found"
+
+          echo "--- File check ---"
+          ls -la mlb_picker.db 2>/dev/null || echo "  mlb_picker.db: MISSING"
+          ls -la model/trained_model.pkl 2>/dev/null || echo "  trained_model.pkl: MISSING"
+          ls -la model/scaler.pkl 2>/dev/null || echo "  scaler.pkl: MISSING"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
