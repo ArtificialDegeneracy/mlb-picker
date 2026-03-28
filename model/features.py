@@ -151,7 +151,12 @@ def _get_pitcher_fip(player_id, team_abbr, conn):
 
 
 def _get_team_quality(team_abbr, game_date, month, conn):
-    """Get blended team quality: prior-weighted projected win% vs actual win%."""
+    """Get blended team quality: prior-weighted projected win% vs actual win%.
+
+    Requires at least 10 games before blending in actual records to avoid
+    extreme swings from small samples (e.g., 1-0 = 100% win rate).
+    """
+    MIN_GAMES_FOR_BLEND = 10
     prior_weight = PRIOR_WEIGHT_BY_MONTH.get(month, 0.15)
 
     projected_wins = WIN_TOTAL_PRIORS.get(team_abbr, 81)
@@ -168,8 +173,13 @@ def _get_team_quality(team_abbr, game_date, month, conn):
             (team_abbr,)
         ).fetchone()
 
-    if row and row["wins"] is not None and row["losses"] is not None and (row["wins"] + row["losses"]) > 0:
-        actual_winpct = row["wins"] / (row["wins"] + row["losses"])
+    if row and row["wins"] is not None and row["losses"] is not None:
+        games_played = row["wins"] + row["losses"]
+        if games_played >= MIN_GAMES_FOR_BLEND:
+            actual_winpct = row["wins"] / games_played
+        else:
+            # Not enough games — use prior only
+            actual_winpct = prior_winpct
     else:
         actual_winpct = prior_winpct
 
