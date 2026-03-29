@@ -161,11 +161,18 @@ def _gather_dashboard_data(date_str):
 
 
 def _compute_streak(conn):
-    """Compute current win/loss streak."""
+    """Compute current win/loss streak based on most recent games by date and time."""
     rows = conn.execute("""
-        SELECT correct FROM picks
-        WHERE correct IS NOT NULL
-        ORDER BY pick_date DESC, game_id DESC
+        SELECT p.correct FROM picks p
+        JOIN games g ON p.game_id = g.game_id
+        WHERE p.correct IS NOT NULL
+          AND p.run_type = (
+            SELECT p2.run_type FROM picks p2
+            WHERE p2.game_id = p.game_id
+            ORDER BY CASE p2.run_type WHEN 'lineup_lock' THEN 0 ELSE 1 END
+            LIMIT 1
+          )
+        ORDER BY p.pick_date DESC, g.game_time DESC
         LIMIT 50
     """).fetchall()
 
