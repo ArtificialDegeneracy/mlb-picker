@@ -756,18 +756,20 @@ function renderTodayTab() {
         const probPct = (pickProb * 100).toFixed(0);
         const barWidth = Math.max(probPct - 40, 5);
 
-        // Detect opener situation — low IP AND low K/9 suggests not a real starter
-        // (A legit starter with only 6 IP in 2026 will have a full 2025 season in the DB,
-        //  so home_ip reflects their best season, not just current year)
-        const homeOpener = p.home_ip !== null && p.home_ip < 20;
-        const awayOpener = p.away_ip !== null && p.away_ip < 20;
-        const hasOpener = homeOpener || awayOpener;
+        // Opener detection — uses flag from Python model (checks career stats across seasons)
+        const openerFlag = p.opener_flag;
         let openerHtml = '';
-        if (hasOpener) {
-            const who = homeOpener ? p.home_starter_name : p.away_starter_name;
-            const team = homeOpener ? p.home_team : p.away_team;
-            const ip = homeOpener ? p.home_ip : p.away_ip;
-            openerHtml = `<div class="card-opener-warning">&#9888; Probable opener: ${who} (${team}, ${ip ? ip.toFixed(1) : '?'} IP) — check who pitches after</div>`;
+        if (openerFlag) {
+            let who, team;
+            if (openerFlag === 'home' || openerFlag === 'both') {
+                who = p.home_starter_name;
+                team = p.home_team;
+            } else {
+                who = p.away_starter_name;
+                team = p.away_team;
+            }
+            const extra = openerFlag === 'both' ? ' (both teams)' : '';
+            openerHtml = `<div class="card-opener-warning">&#9888; Probable opener: ${who} (${team})${extra} — confidence dampened, check who pitches after</div>`;
         }
 
         let resultHtml = '';

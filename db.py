@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS picks (
     confidence TEXT,
     actual_winner TEXT,
     correct INTEGER,
+    opener_flag TEXT,
     PRIMARY KEY (game_id, run_type)
 );
 

@@ -243,11 +243,11 @@ def predict_games(date_str, run_type="morning"):
             # Save to DB
             conn.execute("""
                 INSERT OR REPLACE INTO picks
-                (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence, opener_flag)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 game["game_id"], date_str, run_type,
-                predicted_winner, round(home_win_prob, 4), confidence,
+                predicted_winner, round(home_win_prob, 4), confidence, opener_flag,
             ))
 
         # Sort by confidence level then probability
