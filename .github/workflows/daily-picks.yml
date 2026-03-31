@@ -89,6 +89,12 @@ jobs:
             echo "Database and model ready, skipping init"
           fi
 
+      - name: Migrate database schema
+        run: |
+          if [ -f mlb_picker.db ]; then
+            python3 -c "import sqlite3; c=sqlite3.connect('mlb_picker.db'); [c.execute(f'ALTER TABLE {t} ADD COLUMN {col}') if col else None for t,col in [('picks','opener_flag TEXT'),('pitcher_stats','throw_hand TEXT'),('team_stats','wrc_plus_vs_lhp REAL'),('team_stats','wrc_plus_vs_rhp REAL')] if not any(col.split()[0] in str(r) for r in c.execute(f'PRAGMA table_info({t})').fetchall())]; c.commit(); c.close(); print('Schema migration complete')" 2>/dev/null || echo "Schema already up to date"
+          fi
+
       - name: Determine run mode
         id: mode
         run: |
