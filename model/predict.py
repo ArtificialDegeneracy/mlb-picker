@@ -302,34 +302,44 @@ OPENER_MIN_GP_RATIO = 3 # GP/GS ratio >3 means mostly a reliever
 def _is_probable_opener(pitcher_id, conn):
     """Detect if a listed starter is likely an opener or spot starter.
 
+    Uses the best available season (checks current season first, falls back
+    to previous season) to avoid false positives early in the year when
+    legitimate starters haven't accumulated IP yet.
+
     Checks:
-    - Less than 20 IP (very limited experience)
-    - Less than 5 career starts (reliever being used as opener)
-    - GP/GS ratio > 3 (reliever profile, not a starter)
+    - Less than 20 IP across best available season
+    - Less than 5 starts across best available season
 
     Returns True if the pitcher looks like an opener.
     """
     if not pitcher_id:
         return False
 
-    row = conn.execute("""
-        SELECT innings_pitched, games_started,
-               (SELECT COUNT(*) FROM pitcher_stats ps2
-                WHERE ps2.player_id = ps.player_id) as seasons
-        FROM pitcher_stats ps
+    # Get stats from all available seasons, most recent first
+    rows = conn.execute("""
+        SELECT season, innings_pitched, games_started
+        FROM pitcher_stats
         WHERE player_id = ?
-        ORDER BY season DESC LIMIT 1
-    """, (pitcher_id,)).fetchone()
+        ORDER BY season DESC
+    """, (pitcher_id,)).fetchall()
 
-    if not row:
+    if not rows:
         return True  # Unknown pitcher — treat as opener
 
-    ip = row["innings_pitched"] or 0
-    gs = row["games_started"] or 0
+    # Use the best season for evaluation:
+    # If the most recent season has enough data, use it.
+    # Otherwise fall back to the previous season.
+    best_ip = 0
+    best_gs = 0
+    for row in rows:
+        ip = row["innings_pitched"] or 0
+        gs = row["games_started"] or 0
+        # Take the season with the most IP (handles early-season 2026 vs full 2025)
+        if ip > best_ip:
+            best_ip = ip
+            best_gs = gs
 
-    if ip < OPENER_MAX_IP:
-        return True
-    if gs < OPENER_MAX_GS:
+    if best_ip < OPENER_MAX_IP and best_gs < OPENER_MAX_GS:
         return True
 
     return False

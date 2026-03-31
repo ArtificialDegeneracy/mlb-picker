@@ -45,12 +45,12 @@ def _gather_dashboard_data(date_str):
                    g.status,
                    (SELECT fip FROM pitcher_stats WHERE player_id = g.home_starter_id ORDER BY season DESC LIMIT 1) as home_fip,
                    (SELECT era FROM pitcher_stats WHERE player_id = g.home_starter_id ORDER BY season DESC LIMIT 1) as home_era,
-                   (SELECT innings_pitched FROM pitcher_stats WHERE player_id = g.home_starter_id ORDER BY season DESC LIMIT 1) as home_ip,
+                   (SELECT MAX(innings_pitched) FROM pitcher_stats WHERE player_id = g.home_starter_id) as home_ip,
                    (SELECT k_per_9 FROM pitcher_stats WHERE player_id = g.home_starter_id ORDER BY season DESC LIMIT 1) as home_k9,
                    (SELECT throw_hand FROM pitcher_stats WHERE player_id = g.home_starter_id AND throw_hand IS NOT NULL ORDER BY season DESC LIMIT 1) as home_throw_hand,
                    (SELECT fip FROM pitcher_stats WHERE player_id = g.away_starter_id ORDER BY season DESC LIMIT 1) as away_fip,
                    (SELECT era FROM pitcher_stats WHERE player_id = g.away_starter_id ORDER BY season DESC LIMIT 1) as away_era,
-                   (SELECT innings_pitched FROM pitcher_stats WHERE player_id = g.away_starter_id ORDER BY season DESC LIMIT 1) as away_ip,
+                   (SELECT MAX(innings_pitched) FROM pitcher_stats WHERE player_id = g.away_starter_id) as away_ip,
                    (SELECT k_per_9 FROM pitcher_stats WHERE player_id = g.away_starter_id ORDER BY season DESC LIMIT 1) as away_k9,
                    (SELECT throw_hand FROM pitcher_stats WHERE player_id = g.away_starter_id AND throw_hand IS NOT NULL ORDER BY season DESC LIMIT 1) as away_throw_hand,
                    (SELECT wrc_plus FROM team_stats WHERE team_name = g.home_team AND wrc_plus IS NOT NULL ORDER BY season DESC LIMIT 1) as home_wrc,
@@ -756,7 +756,9 @@ function renderTodayTab() {
         const probPct = (pickProb * 100).toFixed(0);
         const barWidth = Math.max(probPct - 40, 5);
 
-        // Detect opener situation from pitcher IP
+        // Detect opener situation — low IP AND low K/9 suggests not a real starter
+        // (A legit starter with only 6 IP in 2026 will have a full 2025 season in the DB,
+        //  so home_ip reflects their best season, not just current year)
         const homeOpener = p.home_ip !== null && p.home_ip < 20;
         const awayOpener = p.away_ip !== null && p.away_ip < 20;
         const hasOpener = homeOpener || awayOpener;
