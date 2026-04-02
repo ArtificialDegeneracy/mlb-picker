@@ -130,14 +130,32 @@ def build_training_features(start_year=2022, end_year=2025):
 # --- Helper functions ---
 
 def _get_pitcher_fip(player_id, team_abbr, conn):
-    """Get a pitcher's FIP, falling back to team average if unavailable."""
+    """Get a pitcher's blended FIP, weighting current + previous season by IP.
+
+    Early in the season, a pitcher's 2026 FIP (based on 5 IP) is unreliable.
+    We blend it with their 2025 FIP weighted by innings pitched:
+      blended = (fip_2026 * ip_2026 + fip_2025 * ip_2025) / (ip_2026 + ip_2025)
+
+    This naturally shifts toward current-season FIP as IP accumulates.
+    By mid-season (~100 IP), the current year dominates.
+    """
     if player_id:
-        row = conn.execute(
-            "SELECT fip FROM pitcher_stats WHERE player_id = ? AND fip IS NOT NULL ORDER BY season DESC LIMIT 1",
+        rows = conn.execute(
+            "SELECT season, fip, innings_pitched FROM pitcher_stats WHERE player_id = ? AND fip IS NOT NULL ORDER BY season DESC LIMIT 2",
             (player_id,)
-        ).fetchone()
-        if row and row["fip"]:
-            return row["fip"]
+        ).fetchall()
+
+        if rows:
+            total_ip = 0
+            weighted_fip = 0
+            for r in rows:
+                ip = r["innings_pitched"] or 0
+                if ip > 0 and r["fip"] is not None:
+                    weighted_fip += r["fip"] * ip
+                    total_ip += ip
+
+            if total_ip > 0:
+                return round(weighted_fip / total_ip, 2)
 
     # Fallback: team average FIP
     row = conn.execute(
