@@ -19,6 +19,8 @@ FEATURE_NAMES = [
     "bullpen_era_diff",    # home bullpen ERA - away bullpen ERA (negative = home advantage)
     "platoon_wrc_diff",    # home team wRC+ vs starter hand - away team wRC+ vs starter hand
     "park_factor",         # park run environment (>1 = hitter friendly, <1 = pitcher friendly)
+    "home_offense_trend",  # home team recent runs scored vs season avg (+ = hot, - = cold)
+    "away_offense_trend",  # away team recent runs scored vs season avg
 ]
 
 
@@ -78,6 +80,11 @@ def build_feature_vector(game_row, conn=None):
 
         # 6. Park factor
         features["park_factor"] = _get_park_factor(game_row)
+
+        # 7-8. Offense trends (rolling 7-game runs scored vs season average)
+        game_date = game_row["game_date"]
+        features["home_offense_trend"] = _get_offense_trend(game_row["home_team"], game_date, conn)
+        features["away_offense_trend"] = _get_offense_trend(game_row["away_team"], game_date, conn)
 
         return features
 
@@ -244,6 +251,43 @@ def _get_pitcher_hand(pitcher_id, conn):
         (pitcher_id,)
     ).fetchone()
     return row["throw_hand"] if row else None
+
+
+def _get_offense_trend(team_abbr, game_date, conn):
+    """Get team's offensive trend: rolling 7-game runs scored minus season average.
+
+    Positive = team is hot (scoring above average).
+    Negative = team is cold (scoring below average).
+    Returns 0.0 if insufficient data.
+    """
+    if not game_date:
+        return 0.0
+
+    # Get runs scored in all games before this date (same year)
+    year = game_date[:4]
+    rows = conn.execute("""
+        SELECT
+            CASE WHEN home_team = ? THEN home_score ELSE away_score END as runs
+        FROM games
+        WHERE status = 'Final'
+          AND (home_team = ? OR away_team = ?)
+          AND game_date < ? AND game_date >= ?
+          AND home_score IS NOT NULL
+        ORDER BY game_date DESC
+    """, (team_abbr, team_abbr, team_abbr, game_date, f"{year}-01-01")).fetchall()
+
+    if len(rows) < 10:
+        return 0.0  # Need at least 10 games for meaningful season avg
+
+    runs = [r["runs"] for r in rows if r["runs"] is not None]
+    if len(runs) < 10:
+        return 0.0
+
+    recent_7 = runs[:7]
+    season_avg = sum(runs) / len(runs)
+    recent_avg = sum(recent_7) / len(recent_7)
+
+    return round(recent_avg - season_avg, 2)
 
 
 def _get_platoon_wrc(team_abbr, opposing_starter_id, conn):
