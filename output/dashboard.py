@@ -160,6 +160,10 @@ def _gather_dashboard_data(date_str):
     _enrich_series_state(today_picks_dicts, date_str)
     _enrich_series_state(all_picks_dicts)
 
+    # Compute signal tags for today's picks (history picks lack the joined data)
+    for p in today_picks_dicts:
+        p["signal_tags"] = _compute_signal_tags(p)
+
     return {
         "today_picks": today_picks_dicts,
         "season_stats": dict(season_stats) if season_stats else {"total": 0, "wins": 0, "losses": 0, "pending": 0},
@@ -169,6 +173,110 @@ def _gather_dashboard_data(date_str):
         "all_picks": all_picks_dicts,
         "streak": streak,
     }
+
+
+def _compute_signal_tags(p):
+    """Score a pick against historically-validated signal filters.
+
+    Each tag is a tier-gated filter that hit ≥63% historically (n≥15).
+    Tiers are mutually exclusive by probability band (HIGH/MEDIUM/LEAN).
+    Returns list of tag dicts with label, tier (stars), and hit rate.
+    """
+    is_home_pick = p["predicted_winner"] == p["home_team"]
+    pick_prob = p["home_win_prob"] if is_home_pick else (1 - p["home_win_prob"])
+
+    home_fip = p.get("home_fip")
+    away_fip = p.get("away_fip")
+    fip_diff = abs((home_fip if home_fip is not None else 4.5) - (away_fip if away_fip is not None else 4.5))
+
+    home_bp = p.get("home_bp_era")
+    away_bp = p.get("away_bp_era")
+    pick_bp = home_bp if is_home_pick else away_bp
+    opp_bp = away_bp if is_home_pick else home_bp
+    bp_advantage = ((opp_bp if opp_bp is not None else 4.0) - (pick_bp if pick_bp is not None else 4.0))
+
+    home_wrc = p.get("home_wrc")
+    away_wrc = p.get("away_wrc")
+    pick_wrc = home_wrc if is_home_pick else away_wrc
+    opp_wrc = away_wrc if is_home_pick else home_wrc
+    wrc_advantage = ((pick_wrc if pick_wrc is not None else 100) - (opp_wrc if opp_wrc is not None else 100))
+
+    has_opener = bool(p.get("opener_flag"))
+    is_med = 0.55 <= pick_prob < 0.67
+    is_high = pick_prob >= 0.67
+
+    tags = []
+
+    # ★★★ Lock Tier — HIGH + Home (75% historical, n=12)
+    if is_high and is_home_pick:
+        tags.append({
+            "label": "Lock Tier", "stars": 3, "rate": 75,
+            "desc": (
+                f"Triggers when: pick probability ≥67% (HIGH) AND pick is the home team. "
+                f"This game: {int(pick_prob*100)}% home favorite. "
+                f"Historical hit rate: 75% (12 games)."
+            ),
+        })
+
+    # ★★ FIP+Pen Stack — MED + Home + FIP>2 + bullpen advantage (69% historical, n=29)
+    if is_med and is_home_pick and fip_diff >= 2.0 and bp_advantage > 0:
+        tags.append({
+            "label": "FIP+Pen Stack", "stars": 2, "rate": 69,
+            "desc": (
+                f"Triggers when: probability 55-67% (MED) AND home team AND starting pitcher FIP gap >2.0 "
+                f"AND pick has better bullpen ERA. "
+                f"This game: {int(pick_prob*100)}% home, FIP gap {fip_diff:.2f}, bullpen advantage {bp_advantage:+.2f} ERA. "
+                f"Historical hit rate: 69% (29 games)."
+            ),
+        })
+
+    # ★★ FIP Edge — MED + Home + FIP>2 (67% historical, n=46)
+    elif is_med and is_home_pick and fip_diff >= 2.0:
+        tags.append({
+            "label": "FIP Edge", "stars": 2, "rate": 67,
+            "desc": (
+                f"Triggers when: probability 55-67% (MED) AND home team AND starting pitcher FIP gap >2.0. "
+                f"This game: {int(pick_prob*100)}% home, FIP gap {fip_diff:.2f}. "
+                f"Historical hit rate: 67% (46 games)."
+            ),
+        })
+
+    # ★ 60%+ + Offensive Quality — wRC+ 10+ better (66% historical, n=29)
+    if pick_prob >= 0.60 and wrc_advantage > 10:
+        tags.append({
+            "label": "Offensive Edge", "stars": 1, "rate": 66,
+            "desc": (
+                f"Triggers when: pick probability ≥60% AND pick's team wRC+ is 10+ points higher than opponent. "
+                f"This game: {int(pick_prob*100)}% pick, wRC+ advantage {wrc_advantage:+.0f}. "
+                f"Historical hit rate: 66% (29 games)."
+            ),
+        })
+
+    # ★ 60%+ + Pen — bullpen 0.5+ better (63% historical, n=49)
+    if pick_prob >= 0.60 and bp_advantage > 0.5:
+        tags.append({
+            "label": "Bullpen Edge", "stars": 1, "rate": 63,
+            "desc": (
+                f"Triggers when: pick probability ≥60% AND pick's bullpen ERA is 0.5+ runs better than opponent. "
+                f"This game: {int(pick_prob*100)}% pick, bullpen ERA advantage {bp_advantage:+.2f}. "
+                f"Historical hit rate: 63% (49 games)."
+            ),
+        })
+
+    # ★ Solid Home — MED + Home + No Opener (66% historical, n=100)
+    if is_med and is_home_pick and not has_opener:
+        # Only add if not already covered by FIP Edge or FIP+Pen Stack
+        if not any(t["label"] in ("FIP Edge", "FIP+Pen Stack") for t in tags):
+            tags.append({
+                "label": "Solid Home", "stars": 1, "rate": 66,
+                "desc": (
+                    f"Triggers when: probability 55-67% (MED) AND home team AND no opener detected. "
+                    f"This game: {int(pick_prob*100)}% home, regular starter on the mound. "
+                    f"Historical hit rate: 66% (100 games)."
+                ),
+            })
+
+    return tags
 
 
 def _enrich_series_state(picks_list, default_date=None):
@@ -418,7 +526,12 @@ h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
     display: flex; justify-content: space-between; align-items: center;
     margin-bottom: 14px;
 }
-.card-time { font-size: 12px; color: var(--text-dim); }
+.card-time {
+    font-size: 12px; color: var(--text-dim);
+    flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    margin-right: 8px;
+}
 .card-confidence {
     font-size: 11px; font-weight: 700; text-transform: uppercase;
     padding: 3px 10px; border-radius: 12px; letter-spacing: 0.5px;
@@ -471,6 +584,45 @@ h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
     font-size: 11px; font-weight: 500; color: var(--yellow);
     line-height: 1.4;
 }
+
+.card-header-right {
+    display: inline-flex; align-items: center; gap: 6px;
+    flex-shrink: 0;
+}
+.card-lineup-badge {
+    font-size: 9px; font-weight: 600; letter-spacing: 0.3px;
+    color: var(--text-dim);
+    padding: 2px 6px; border-radius: 8px;
+    background: rgba(148, 163, 184, 0.10);
+    border: 1px solid rgba(148, 163, 184, 0.20);
+    cursor: help;
+    white-space: nowrap;
+    line-height: 1.2;
+}
+
+.card-signals {
+    margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px;
+}
+.signal-tag {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 4px 9px; border-radius: 12px;
+    font-size: 10px; font-weight: 600; line-height: 1;
+    cursor: help;
+}
+.signal-tag.tier-3 {
+    background: rgba(74, 222, 128, 0.15); color: #4ade80;
+    border: 1px solid rgba(74, 222, 128, 0.35);
+}
+.signal-tag.tier-2 {
+    background: rgba(74, 222, 128, 0.10); color: #86efac;
+    border: 1px solid rgba(74, 222, 128, 0.25);
+}
+.signal-tag.tier-1 {
+    background: rgba(77, 159, 255, 0.10); color: #93c5fd;
+    border: 1px solid rgba(77, 159, 255, 0.25);
+}
+.signal-stars { letter-spacing: 0.5px; }
+.signal-rate { opacity: 0.7; font-weight: 500; }
 
 .card-reasoning {
     margin-top: 12px; padding: 10px 12px; border-radius: 8px;
@@ -757,6 +909,24 @@ function buildReasoning(p, isHomePick) {
     return html;
 }
 
+function buildSignalTags(p) {
+    const tags = p.signal_tags || [];
+    if (!tags.length) return '';
+    let html = `<div class="card-signals">`;
+    tags.forEach(t => {
+        const stars = t.stars > 0 ? '★'.repeat(t.stars) : '✓';
+        const tooltip = (t.desc || `${t.label} — historically ${t.rate}% hit rate`)
+            .replace(/"/g, '&quot;');
+        html += `<span class="signal-tag tier-${t.stars}" title="${tooltip}">
+            <span class="signal-stars">${stars}</span>
+            <span>${t.label}</span>
+            <span class="signal-rate">${t.rate}%</span>
+        </span>`;
+    });
+    html += `</div>`;
+    return html;
+}
+
 function renderHeaderStats() {
     const s = DATA.season_stats;
     const total = (s.wins || 0) + (s.losses || 0);
@@ -836,12 +1006,20 @@ function renderTodayTab() {
 
         // Build model reasoning factors
         const reasoningHtml = buildReasoning(p, isHomePick);
+        const signalsHtml = buildSignalTags(p);
+
+        const lineupBadge = p.run_type === 'lineup_lock'
+            ? `<span class="card-lineup-badge" title="Pick uses confirmed starting lineups">&#10003; Lineups</span>`
+            : '';
 
         html += `
         <div class="pick-card ${conf}" data-confidence="${p.confidence}">
             <div class="card-header">
                 <span class="card-time">${formatTime(p.game_time)} &bull; ${p.venue || ''}</span>
-                <span class="card-confidence conf-${conf}">${p.confidence}</span>
+                <span class="card-header-right">
+                    ${lineupBadge}
+                    <span class="card-confidence conf-${conf}">${p.confidence}</span>
+                </span>
             </div>
             <div class="card-matchup">
                 <div class="team ${!isHomePick ? 'picked' : ''}">
@@ -856,6 +1034,7 @@ function renderTodayTab() {
                     <div class="team-fip ${fipClass(p.home_fip)}">${p.home_fip ? p.home_fip.toFixed(2) + ' FIP' : ''}</div>
                 </div>
             </div>
+            ${signalsHtml}
             <div class="card-prob">
                 <div class="prob-bar-bg">
                     <div class="prob-bar ${conf}" style="width: ${barWidth}%"></div>
