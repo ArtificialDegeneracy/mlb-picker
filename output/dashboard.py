@@ -187,7 +187,10 @@ def _compute_signal_tags(p):
 
     home_fip = p.get("home_fip")
     away_fip = p.get("away_fip")
-    fip_diff = abs((home_fip if home_fip is not None else 4.5) - (away_fip if away_fip is not None else 4.5))
+    pick_fip = (home_fip if is_home_pick else away_fip) if (home_fip is not None and away_fip is not None) else 4.5
+    opp_fip = (away_fip if is_home_pick else home_fip) if (home_fip is not None and away_fip is not None) else 4.5
+    # Positive = pick has better (lower) FIP than opponent
+    fip_pick_advantage = ((opp_fip if opp_fip is not None else 4.5) - (pick_fip if pick_fip is not None else 4.5))
 
     home_bp = p.get("home_bp_era")
     away_bp = p.get("away_bp_era")
@@ -218,26 +221,39 @@ def _compute_signal_tags(p):
             ),
         })
 
-    # ★★ FIP+Pen Stack — MED + Home + FIP>2 + bullpen advantage (69% historical, n=29)
-    if is_med and is_home_pick and fip_diff >= 2.0 and bp_advantage > 0:
+    # ★★★ Ace Stack — 60%+ + pick FIP better by 2+ + no opener (90% historical, n=20)
+    if pick_prob >= 0.60 and fip_pick_advantage >= 2.0 and not has_opener:
         tags.append({
-            "label": "FIP+Pen Stack", "stars": 2, "rate": 69,
+            "label": "Ace Stack", "stars": 3, "rate": 90,
             "desc": (
-                f"Triggers when: probability 55-67% (MED) AND home team AND starting pitcher FIP gap >2.0 "
-                f"AND pick has better bullpen ERA. "
-                f"This game: {int(pick_prob*100)}% home, FIP gap {fip_diff:.2f}, bullpen advantage {bp_advantage:+.2f} ERA. "
-                f"Historical hit rate: 69% (29 games)."
+                f"Triggers when: pick probability ≥60% AND pick's starter FIP is 2.0+ better "
+                f"AND no opener detected. "
+                f"This game: {int(pick_prob*100)}% pick, pick starter FIP advantage {fip_pick_advantage:+.2f}. "
+                f"Historical hit rate: 90% (20 games)."
             ),
         })
 
-    # ★★ FIP Edge — MED + Home + FIP>2 (67% historical, n=46)
-    elif is_med and is_home_pick and fip_diff >= 2.0:
+    # ★★ FIP+Pen Stack — MED + Home + pick FIP better by 2+ + bullpen advantage (76% historical, n=25)
+    if is_med and is_home_pick and fip_pick_advantage >= 2.0 and bp_advantage > 0:
         tags.append({
-            "label": "FIP Edge", "stars": 2, "rate": 67,
+            "label": "FIP+Pen Stack", "stars": 2, "rate": 76,
             "desc": (
-                f"Triggers when: probability 55-67% (MED) AND home team AND starting pitcher FIP gap >2.0. "
-                f"This game: {int(pick_prob*100)}% home, FIP gap {fip_diff:.2f}. "
-                f"Historical hit rate: 67% (46 games)."
+                f"Triggers when: probability 55-67% (MED) AND home team AND pick's starter FIP is 2.0+ better "
+                f"AND pick has better bullpen ERA. "
+                f"This game: {int(pick_prob*100)}% home, pick starter FIP advantage {fip_pick_advantage:+.2f}, "
+                f"bullpen advantage {bp_advantage:+.2f} ERA. "
+                f"Historical hit rate: 76% (25 games)."
+            ),
+        })
+
+    # ★★ FIP Edge — MED + Home + pick FIP better by 2+ (81% historical, n=36)
+    elif is_med and is_home_pick and fip_pick_advantage >= 2.0:
+        tags.append({
+            "label": "FIP Edge", "stars": 2, "rate": 81,
+            "desc": (
+                f"Triggers when: probability 55-67% (MED) AND home team AND pick's starter FIP is 2.0+ better. "
+                f"This game: {int(pick_prob*100)}% home, pick starter FIP advantage {fip_pick_advantage:+.2f}. "
+                f"Historical hit rate: 81% (36 games)."
             ),
         })
 
