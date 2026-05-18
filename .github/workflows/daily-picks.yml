@@ -24,6 +24,14 @@ on:
         description: 'Date override (YYYY-MM-DD, leave empty for today/yesterday)'
         required: false
         default: ''
+      force_seed:
+        description: 'Skip artifact restore and use seed/ DB+model (deploy mechanism)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   contents: write
@@ -46,20 +54,24 @@ jobs:
 
       - name: Restore database and model
         run: |
-          # Download artifacts from previous run if they exist
-          # gh run download extracts into a subdirectory named after the artifact
-          gh run download --name mlb-picker-db --dir /tmp/db-restore 2>/dev/null && \
-            cp /tmp/db-restore/mlb_picker.db . 2>/dev/null && \
-            echo "DB restored" || echo "No previous DB found"
-
-          if gh run download --name mlb-picker-model --dir /tmp/model-restore 2>/dev/null; then
-            echo "Model artifact downloaded. Contents:"
-            find /tmp/model-restore -type f
-            find /tmp/model-restore -name "trained_model.pkl" -exec cp {} model/ \;
-            find /tmp/model-restore -name "scaler.pkl" -exec cp {} model/ \;
-            echo "Model restored"
+          if [ "${{ inputs.force_seed }}" = "true" ]; then
+            echo "force_seed=true — skipping artifact restore, will fall back to seed/"
           else
-            echo "No previous model found"
+            # Download artifacts from previous run if they exist
+            # gh run download extracts into a subdirectory named after the artifact
+            gh run download --name mlb-picker-db --dir /tmp/db-restore 2>/dev/null && \
+              cp /tmp/db-restore/mlb_picker.db . 2>/dev/null && \
+              echo "DB restored" || echo "No previous DB found"
+
+            if gh run download --name mlb-picker-model --dir /tmp/model-restore 2>/dev/null; then
+              echo "Model artifact downloaded. Contents:"
+              find /tmp/model-restore -type f
+              find /tmp/model-restore -name "trained_model.pkl" -exec cp {} model/ \;
+              find /tmp/model-restore -name "scaler.pkl" -exec cp {} model/ \;
+              echo "Model restored"
+            else
+              echo "No previous model found"
+            fi
           fi
 
           echo "--- File check ---"
