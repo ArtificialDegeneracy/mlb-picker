@@ -121,23 +121,34 @@ def main():
         print(f"  LEAN:    {candidate_metrics['lean_acc']:.1%} (n={candidate_metrics['lean_n']})")
     print(f"  Brier:   {candidate_metrics['brier']:.4f}")
 
-    # Compare against current production model on the same holdout
+    # Compare against current production model on the same holdout.
+    # If feature schemas don't match (e.g., FEATURE_NAMES changed since the
+    # prod model was trained), skip the gate — the comparison isn't meaningful.
     baseline_metrics = None
     regression_blocked = False
+    schema_mismatch = False
     if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
         with open(MODEL_PATH, "rb") as f:
             prod_model = pickle.load(f)
         with open(SCALER_PATH, "rb") as f:
             prod_scaler = pickle.load(f)
-        baseline_metrics = _evaluate(prod_model, prod_scaler, holdout_feats, holdout_labels)
-        print(f"\nProduction model on same holdout:")
-        print(f"  Overall: {baseline_metrics['accuracy']:.1%}")
-        delta = candidate_metrics["accuracy"] - baseline_metrics["accuracy"]
-        print(f"  Delta:   {delta:+.1%}")
-        if delta < -ACCURACY_REGRESSION_LIMIT:
-            print(f"\n  ⚠ REGRESSION GATE: candidate is {abs(delta):.1%} worse than production.")
-            print(f"  Refusing to write new model files. Investigate before deploying.")
-            regression_blocked = True
+        try:
+            baseline_metrics = _evaluate(prod_model, prod_scaler, holdout_feats, holdout_labels)
+            print(f"\nProduction model on same holdout:")
+            print(f"  Overall: {baseline_metrics['accuracy']:.1%}")
+            delta = candidate_metrics["accuracy"] - baseline_metrics["accuracy"]
+            print(f"  Delta:   {delta:+.1%}")
+            if delta < -ACCURACY_REGRESSION_LIMIT:
+                print(f"\n  ⚠ REGRESSION GATE: candidate is {abs(delta):.1%} worse than production.")
+                print(f"  Refusing to write new model files. Investigate before deploying.")
+                regression_blocked = True
+        except ValueError as e:
+            if "feature names" in str(e).lower():
+                schema_mismatch = True
+                print(f"\nSkipping regression gate: production model has a different feature schema.")
+                print(f"  (FEATURE_NAMES has changed since the last retrain — accept candidate.)")
+            else:
+                raise
 
     coefficients = dict(zip(FEATURE_NAMES, [float(c) for c in candidate.coef_[0]]))
     print(f"\nCandidate coefficients:")

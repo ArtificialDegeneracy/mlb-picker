@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 # Feature names in order — must match what predict.py expects
 FEATURE_NAMES = [
     "fip_diff",            # home starter FIP - away starter FIP (negative = home advantage)
-    "home_flag",           # always 1 (model learns home field advantage weight)
     "team_quality_diff",   # blended win% difference (home - away)
     "park_factor",         # park run environment (>1 = hitter friendly, <1 = pitcher friendly)
     "home_offense_trend",  # home team recent runs scored vs season avg (+ = hot, - = cold)
@@ -50,20 +49,17 @@ def build_feature_vector(game_row, conn=None):
         else:
             features["fip_diff"] = 0.0
 
-        # 2. Home field flag
-        features["home_flag"] = 1.0
-
-        # 3. Team quality differential (prior-blended win%)
+        # 2. Team quality differential (prior-blended win%)
         game_date = game_row["game_date"]
         month = int(game_date[5:7]) if game_date else 6
         home_quality = _get_team_quality(game_row["home_team"], game_date, month, conn)
         away_quality = _get_team_quality(game_row["away_team"], game_date, month, conn)
         features["team_quality_diff"] = home_quality - away_quality
 
-        # 4. Park factor
+        # 3. Park factor
         features["park_factor"] = _get_park_factor(game_row)
 
-        # 5-6. Offense trends (rolling 7-game runs scored vs season average)
+        # 4-5. Offense trends (rolling 7-game runs scored vs season average)
         game_date = game_row["game_date"]
         features["home_offense_trend"] = _get_offense_trend(game_row["home_team"], game_date, conn)
         features["away_offense_trend"] = _get_offense_trend(game_row["away_team"], game_date, conn)
@@ -193,21 +189,43 @@ def _get_team_quality(team_abbr, game_date, month, conn):
     return prior_weight * prior_winpct + (1 - prior_weight) * actual_winpct
 
 
-def _get_bullpen_era(team_abbr, conn):
-    """Get team bullpen ERA from FanGraphs data."""
-    row = conn.execute(
-        "SELECT bullpen_era FROM team_stats WHERE team_name = ? AND bullpen_era IS NOT NULL ORDER BY season DESC LIMIT 1",
-        (team_abbr,)
-    ).fetchone()
+def _get_bullpen_era(team_abbr, conn, season=None):
+    """Get team bullpen ERA from FanGraphs data for the given season.
+
+    If season is provided, use that season's row (falling back to most recent
+    prior season if missing). If season is None, use most recent overall.
+    Avoids lookahead bias when used in historical training.
+    """
+    if season is not None:
+        row = conn.execute(
+            "SELECT bullpen_era FROM team_stats WHERE team_name = ? AND season <= ? AND bullpen_era IS NOT NULL ORDER BY season DESC LIMIT 1",
+            (team_abbr, season)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT bullpen_era FROM team_stats WHERE team_name = ? AND bullpen_era IS NOT NULL ORDER BY season DESC LIMIT 1",
+            (team_abbr,)
+        ).fetchone()
     return row["bullpen_era"] if row else None
 
 
-def _get_wrc_plus(team_abbr, conn):
-    """Get team wRC+ from FanGraphs data."""
-    row = conn.execute(
-        "SELECT wrc_plus FROM team_stats WHERE team_name = ? AND wrc_plus IS NOT NULL ORDER BY season DESC LIMIT 1",
-        (team_abbr,)
-    ).fetchone()
+def _get_wrc_plus(team_abbr, conn, season=None):
+    """Get team wRC+ from FanGraphs data for the given season.
+
+    If season is provided, use that season's row (falling back to most recent
+    prior season if missing). If season is None, use most recent overall.
+    Avoids lookahead bias when used in historical training.
+    """
+    if season is not None:
+        row = conn.execute(
+            "SELECT wrc_plus FROM team_stats WHERE team_name = ? AND season <= ? AND wrc_plus IS NOT NULL ORDER BY season DESC LIMIT 1",
+            (team_abbr, season)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT wrc_plus FROM team_stats WHERE team_name = ? AND wrc_plus IS NOT NULL ORDER BY season DESC LIMIT 1",
+            (team_abbr,)
+        ).fetchone()
     return row["wrc_plus"] if row else None
 
 
@@ -272,28 +290,41 @@ def _get_offense_trend(team_abbr, game_date, conn):
     return round(recent_avg - season_avg, 2)
 
 
-def _get_platoon_wrc(team_abbr, opposing_starter_id, conn):
+def _get_platoon_wrc(team_abbr, opposing_starter_id, conn, season=None):
     """Get team's wRC+ against the opposing starter's throwing hand.
 
     If the opposing starter is a LHP, returns team's wRC+ vs LHP.
     If RHP, returns wRC+ vs RHP.
     Falls back to overall wRC+ if platoon data is missing.
+    Season-aware to avoid lookahead bias in historical training.
     """
     hand = _get_pitcher_hand(opposing_starter_id, conn)
 
     if hand == "L":
-        row = conn.execute(
-            "SELECT wrc_plus_vs_lhp FROM team_stats WHERE team_name = ? AND wrc_plus_vs_lhp IS NOT NULL ORDER BY season DESC LIMIT 1",
-            (team_abbr,)
-        ).fetchone()
+        if season is not None:
+            row = conn.execute(
+                "SELECT wrc_plus_vs_lhp FROM team_stats WHERE team_name = ? AND season <= ? AND wrc_plus_vs_lhp IS NOT NULL ORDER BY season DESC LIMIT 1",
+                (team_abbr, season)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT wrc_plus_vs_lhp FROM team_stats WHERE team_name = ? AND wrc_plus_vs_lhp IS NOT NULL ORDER BY season DESC LIMIT 1",
+                (team_abbr,)
+            ).fetchone()
         if row and row["wrc_plus_vs_lhp"] is not None:
             return row["wrc_plus_vs_lhp"]
     elif hand == "R":
-        row = conn.execute(
-            "SELECT wrc_plus_vs_rhp FROM team_stats WHERE team_name = ? AND wrc_plus_vs_rhp IS NOT NULL ORDER BY season DESC LIMIT 1",
-            (team_abbr,)
-        ).fetchone()
+        if season is not None:
+            row = conn.execute(
+                "SELECT wrc_plus_vs_rhp FROM team_stats WHERE team_name = ? AND season <= ? AND wrc_plus_vs_rhp IS NOT NULL ORDER BY season DESC LIMIT 1",
+                (team_abbr, season)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT wrc_plus_vs_rhp FROM team_stats WHERE team_name = ? AND wrc_plus_vs_rhp IS NOT NULL ORDER BY season DESC LIMIT 1",
+                (team_abbr,)
+            ).fetchone()
         if row and row["wrc_plus_vs_rhp"] is not None:
             return row["wrc_plus_vs_rhp"]
 
-    return _get_wrc_plus(team_abbr, conn)
+    return _get_wrc_plus(team_abbr, conn, season=season)

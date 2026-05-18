@@ -3,7 +3,10 @@ __pycache__/
 mlb_picker.db
 mlb_picker.db-shm
 mlb_picker.db-wal
+mlb.db
 logs/
 output/mlb_picks.html
 model/retrain_report.json
+model/archive/
+.claude/
 .DS_Store
