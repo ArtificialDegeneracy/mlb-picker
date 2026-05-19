@@ -5,6 +5,51 @@ Most-recent additions at the top.
 
 ---
 
+## lineup_lock pipeline bugs — 1 of 4 fixed 2026-05-19
+
+Found during a "what data are we missing?" audit. lineup_lock was supposed to be the
+strongest-tier pick path (closest to game time, most recent data, lineup-aware) but
+several pieces of the pipeline were silently broken.
+
+**Bug 2 FIXED 2026-05-19:** scheduler.py:lineup_lock did NOT re-run opener detection
+or apply opener dampening. Morning picks dampen 40% toward 50% when an opener is detected;
+lineup_lock picks did not, so HIGH/MEDIUM tier assignments were inconsistent between
+the two runs for opener games. Lineup_lock probabilities looked more confident than
+they should have. Now re-detects and dampens the same way `predict_games` does.
+
+**Bug 1 STILL OPEN:** `scheduler.py:158` writes lineup OPS into `feats["platoon_wrc_diff"]`,
+but `platoon_wrc_diff` is not in `FEATURE_NAMES` — the model never sees lineup OPS.
+Same pattern as the dead `home_flag` we cleaned up. Fix is either: (a) add a
+lineup-specific feature (`lineup_ops_diff`) to FEATURE_NAMES and train the model on it
+(but only available at lineup_lock — model needs to handle the morning case differently),
+or (b) replace it with a lineup-derived dampening adjustment to the existing probability.
+This is genuinely orthogonal-to-W-L data we already collect and throw away.
+
+**Bug 3 STILL OPEN:** Weather data fetched only in morning via `main.py:refresh_data`,
+but MLB Stats API returns `weather: {}` for games in `Preview` status (not yet started).
+At 8 AM ET when morning runs, 0 of 15 games have weather. Season-to-date: 48/639
+(7.5%) games have weather. Fix: also call `get_game_weather` in scheduler's lineup_lock
+path, which runs 2-3 hours before first pitch when MLB has actually published wind/temp.
+
+**Bug 4 (related to 1) STILL OPEN:** The "lineup-aware platoon override" was designed
+for a previous version of the model that had `platoon_wrc_diff` in FEATURE_NAMES.
+When the feature was removed/refactored, the producer code in scheduler.py wasn't
+updated. Audit other producer-side code for similar dangling writes.
+
+---
+
+## NYY bullpen ERA = 0.0 data bug — observed 2026-05-18
+
+Yesterday's NYY pick (vs TOR) was 62% partly because team_stats.bullpen_era for NYY
+in 2026 is **0.0** — a phantom "best bullpen in baseball" value. This is almost
+certainly a FanGraphs pull bug (zero ER over 47 games is implausible). Audit needed:
+
+- Check all 2026 team_stats for suspicious null/zero values
+- Find the bug in `data/fangraphs.py` that's misparsing or skipping bullpen rows
+- The model is silently penalizing/inflating picks based on bad team stats
+
+---
+
 ## ~~Expand model feature set~~ — RESOLVED 2026-05-18
 
 **Conclusion:** Adding `bullpen_diff`, `wrc_plus_diff`, `platoon_wrc_diff` to the regression

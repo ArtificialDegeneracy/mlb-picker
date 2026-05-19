@@ -24,7 +24,7 @@ from data.mlb_api import get_schedule, get_pitcher_season_stats, get_all_team_re
 from data.fip import compute_fip_from_stats
 from data.fangraphs import refresh_fangraphs_stats
 from data.lineups import fetch_and_cache_lineup, LINEUP_WEAK_THRESHOLD, LINEUP_DAMPEN_FACTOR
-from model.predict import predict_games, print_predictions, load_model
+from model.predict import predict_games, print_predictions, load_model, _is_probable_opener
 from model.features import build_feature_vector, FEATURE_NAMES
 from output.dashboard import generate_dashboard
 
@@ -164,6 +164,25 @@ def run_lineup_lock(date_str=None):
             feat_scaled = scaler.transform(feat_df)
             home_win_prob = model.predict_proba(feat_scaled)[0][1]
 
+            # Re-detect openers at lineup_lock time and dampen the raw model probability
+            # toward 50%. Mirrors model.predict.predict_games() so morning and lineup_lock
+            # are calibrated the same way.
+            home_opener = _is_probable_opener(g["home_starter_id"], conn)
+            away_opener = _is_probable_opener(g["away_starter_id"], conn)
+            opener_flag = None
+            if home_opener or away_opener:
+                OPENER_DAMPEN = 0.40
+                pre_dampen = home_win_prob
+                home_win_prob = 0.5 + (home_win_prob - 0.5) * (1 - OPENER_DAMPEN)
+                if home_opener and away_opener:
+                    opener_flag = "both"
+                elif home_opener:
+                    opener_flag = "home"
+                else:
+                    opener_flag = "away"
+                logger.info(f"    Opener detected ({opener_flag}): "
+                            f"prob {pre_dampen:.0%} → {home_win_prob:.0%}")
+
             # Dampen for weakened lineups
             lineup_flags = []
             for side, ld, team in [("home", home_ld, g["home_team"]), ("away", away_ld, g["away_team"])]:
@@ -197,12 +216,11 @@ def run_lineup_lock(date_str=None):
 
             # Check if pick changed from morning
             morning = conn.execute(
-                "SELECT predicted_winner, opener_flag FROM picks WHERE game_id = ? AND run_type = 'morning'",
+                "SELECT predicted_winner FROM picks WHERE game_id = ? AND run_type = 'morning'",
                 (g["game_id"],)
             ).fetchone()
             changed = morning and morning["predicted_winner"] != predicted_winner
             change_marker = " ** CHANGED **" if changed else ""
-            opener_flag = morning["opener_flag"] if morning and "opener_flag" in morning.keys() else None
 
             print(f"  {g['away_team']} @ {g['home_team']}: {predicted_winner} {pick_prob:.0%} {confidence}{change_marker}")
 
