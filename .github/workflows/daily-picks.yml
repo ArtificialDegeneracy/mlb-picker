@@ -137,6 +137,38 @@ jobs:
           fi
           python scheduler.py ${{ steps.mode.outputs.mode }} $DATE_ARG
 
+      # --- Champion/challenger shadow testing -------------------------------
+      # The XGBoost challenger runs ALONGSIDE production. It writes only to the
+      # shadow_picks table; the production `picks` table is never touched.
+      # continue-on-error: a challenger failure is logged but NEVER fails the
+      # job — production picks must always complete. See model/shadow.py.
+
+      - name: Shadow predict (challenger, morning run only)
+        if: steps.mode.outputs.mode == 'morning'
+        continue-on-error: true
+        run: |
+          DATE_ARG=""
+          if [ -n "${{ inputs.date }}" ]; then
+            DATE_ARG="--date ${{ inputs.date }}"
+          fi
+          python -m model.shadow predict $DATE_ARG
+
+      - name: Shadow score (challenger, results run only)
+        if: steps.mode.outputs.mode == 'results'
+        continue-on-error: true
+        run: |
+          # results mode scores YESTERDAY's games — score the shadow picks for
+          # the same date. Honors the manual date override if given.
+          if [ -n "${{ inputs.date }}" ]; then
+            SHADOW_DATE="${{ inputs.date }}"
+          else
+            SHADOW_DATE=$(date -u -d "yesterday" +%Y-%m-%d 2>/dev/null \
+              || date -u -v-1d +%Y-%m-%d)
+          fi
+          python -m model.shadow score --date "$SHADOW_DATE"
+          echo "--- champion vs challenger so far ---"
+          python -m model.shadow report || true
+
       - name: Regenerate dashboard for today
         run: python -c "from output.dashboard import generate_dashboard; from datetime import datetime; generate_dashboard(datetime.now().strftime('%Y-%m-%d'))"
 

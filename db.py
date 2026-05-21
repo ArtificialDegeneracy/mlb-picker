@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS picks (
     actual_winner TEXT,
     correct INTEGER,
     opener_flag TEXT,
+    pick_flipped INTEGER DEFAULT 0,
     PRIMARY KEY (game_id, run_type)
 );
 
@@ -112,12 +113,145 @@ CREATE TABLE IF NOT EXISTS win_total_priors (
     season INTEGER
 );
 
+-- Champion/challenger shadow picks. Production keeps writing to `picks`;
+-- challenger models (XGBoost, balldontlie-fed variants) write here instead.
+-- This table is NEVER read by the dashboard, run_results, or model training —
+-- it exists purely so a challenger can be scored alongside production without
+-- any risk of contaminating the real contest tracker. model_version is part
+-- of the key, so multiple challengers can coexist for the same game.
+CREATE TABLE IF NOT EXISTS shadow_picks (
+    game_id TEXT,
+    pick_date TEXT,
+    run_type TEXT,
+    model_version TEXT,        -- e.g. 'xgb_5feat', 'xgb_bdl', 'logreg_baseline'
+    predicted_winner TEXT,
+    home_win_prob REAL,
+    confidence TEXT,
+    actual_winner TEXT,        -- filled by the shadow scorer (mirrors run_results)
+    correct INTEGER,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (game_id, run_type, model_version)
+);
+
+CREATE TABLE IF NOT EXISTS fip_constants (
+    season INTEGER PRIMARY KEY,
+    fip_constant REAL NOT NULL,
+    computed_at TEXT
+);
+
+-- balldontlie API cache tables (Path B feature expansion).
+-- These store advanced data balldontlie provides that the MLB Stats API /
+-- FanGraphs sources don't. They are SEPARATE from the core pipeline tables:
+-- model/feature_staging.py reads from them, but data/mlb_api.py and
+-- data/fangraphs.py never touch them. Populated by a (future) balldontlie
+-- ingest; until then they are empty and feature_staging falls back gracefully.
+--
+-- player_id / team_id here are balldontlie's OWN ids, not MLB Stats API ids.
+-- The crosswalk lives in bdl_id_map.
+
+CREATE TABLE IF NOT EXISTS bdl_id_map (
+    mlb_id INTEGER,            -- MLB Stats API id (what the rest of the DB uses)
+    bdl_id INTEGER,            -- balldontlie's internal id
+    entity_type TEXT,          -- 'player' | 'team'
+    name TEXT,                 -- for audit / fuzzy-match review
+    resolved_at TEXT DEFAULT (datetime('now')),
+    match_quality TEXT,        -- 'exact' | 'fuzzy'
+    PRIMARY KEY (mlb_id, entity_type)
+);
+
+CREATE TABLE IF NOT EXISTS bdl_pitch_type_stats (
+    player_id INTEGER,         -- balldontlie id
+    season INTEGER,
+    role TEXT,                 -- 'pitcher' | 'hitter' (which endpoint it came from)
+    pitch_type TEXT,
+    pitch_usage_percent REAL,
+    whiff_percent REAL,
+    chase_percent REAL,
+    zone_percent REAL,
+    ba REAL,
+    slg REAL,
+    woba REAL,
+    xwoba REAL,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (player_id, season, role, pitch_type)
+);
+
+CREATE TABLE IF NOT EXISTS bdl_h2h (
+    batter_id INTEGER,         -- balldontlie id
+    opponent_team_id INTEGER,  -- balldontlie id
+    at_bats INTEGER,
+    hits INTEGER,
+    home_runs INTEGER,
+    avg REAL,
+    obp REAL,
+    slg REAL,
+    ops REAL,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (batter_id, opponent_team_id)
+);
+
+-- /players/splits returns data keyed by category (e.g. byArena confirmed in
+-- the docs; vs-hand / by-month keys exist but their exact strings are not in
+-- the truncated docs — the probe confirms them). Each split row carries
+-- split_category / split_name / split_abbreviation plus batting AND pitching
+-- fields. split_name holds values like 'vs RHP'; PROBE-CONFIRM the exact
+-- strings before the ingest relies on them.
+CREATE TABLE IF NOT EXISTS bdl_player_splits (
+    player_id INTEGER,         -- balldontlie id
+    season INTEGER,
+    split_category TEXT,       -- API 'split_category' (the grouping)
+    split_name TEXT,           -- API 'split_name' e.g. 'vs RHP', 'April'
+    split_abbreviation TEXT,   -- API 'split_abbreviation'
+    role TEXT,                 -- 'pitching' | 'batting' (which fields are populated)
+    era REAL,
+    avg REAL,
+    obp REAL,
+    slg REAL,
+    ops REAL,
+    woba REAL,                 -- may be null — balldontlie does not always populate
+    innings_pitched REAL,
+    at_bats INTEGER,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (player_id, season, split_category, split_name, role)
+);
+
+CREATE TABLE IF NOT EXISTS bdl_injuries (
+    player_id INTEGER,         -- balldontlie id
+    team_id INTEGER,           -- balldontlie id
+    snapshot_date TEXT,        -- date this injury snapshot was pulled
+    injury_date TEXT,
+    return_date TEXT,
+    injury_type TEXT,
+    detail TEXT,
+    side TEXT,
+    status TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (player_id, snapshot_date)
+);
+
+-- Column names mirror the API's season_stats field names exactly (pitching_gs,
+-- pitching_qs, ...) so the ingest is a direct field->column copy.
+CREATE TABLE IF NOT EXISTS bdl_season_stats (
+    player_id INTEGER,         -- balldontlie id
+    season INTEGER,
+    pitching_war REAL,
+    batting_war REAL,
+    pitching_qs INTEGER,
+    pitching_gs INTEGER,       -- API 'pitching_gs' (games started)
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (player_id, season)
+);
+
 CREATE INDEX IF NOT EXISTS idx_games_date ON games(game_date);
 CREATE INDEX IF NOT EXISTS idx_picks_date ON picks(pick_date);
 CREATE INDEX IF NOT EXISTS idx_picks_game_id ON picks(game_id);
 CREATE INDEX IF NOT EXISTS idx_pitcher_stats_player ON pitcher_stats(player_id);
 CREATE INDEX IF NOT EXISTS idx_team_stats_name ON team_stats(team_name);
 CREATE INDEX IF NOT EXISTS idx_lineups_team_date ON game_lineups(team, lineup_date);
+CREATE INDEX IF NOT EXISTS idx_bdl_id_map_bdl ON bdl_id_map(bdl_id, entity_type);
+CREATE INDEX IF NOT EXISTS idx_bdl_pitch_type_season ON bdl_pitch_type_stats(season, role);
+CREATE INDEX IF NOT EXISTS idx_bdl_splits_player ON bdl_player_splits(player_id, season);
+CREATE INDEX IF NOT EXISTS idx_shadow_picks_date ON shadow_picks(pick_date, model_version);
 """
 
 
