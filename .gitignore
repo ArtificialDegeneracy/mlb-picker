@@ -7,6 +7,9 @@ mlb.db
 logs/
 output/mlb_picks.html
 model/retrain_report.json
+model/xgb_experiment_report.json
 model/archive/
 .claude/
 .DS_Store
+scratch/
+graphify-out/
