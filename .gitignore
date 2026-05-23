@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
+.env
+data/.bdl_key
 mlb_picker.db
 mlb_picker.db-shm
 mlb_picker.db-wal

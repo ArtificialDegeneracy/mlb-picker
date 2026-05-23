@@ -172,6 +172,42 @@ jobs:
       - name: Regenerate dashboard for today
         run: python -c "from output.dashboard import generate_dashboard; from datetime import datetime; generate_dashboard(datetime.now().strftime('%Y-%m-%d'))"
 
+      # --- balldontlie ingest + Goose dashboard -----------------------------
+      # The ingest pulls today's odds, arsenals, batting, form, and injuries
+      # into the bdl_*_today cache tables. GOAT-tier (600 req/min) makes the
+      # full daily ingest ~1 minute synchronous. continue-on-error so a
+      # balldontlie outage NEVER fails the cron — production picks are written
+      # above; the Goose dashboard is supplementary until the soak completes.
+
+      - name: Ingest balldontlie data
+        if: steps.mode.outputs.mode != 'results'
+        continue-on-error: true
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: |
+          DATE_ARG=""
+          if [ -n "${{ inputs.date }}" ]; then
+            DATE_ARG="--date ${{ inputs.date }}"
+          fi
+          # Crosswalk runs on morning only — rosters change rarely; nightly is
+          # plenty. Lineup-lock crons just refresh the per-day snapshots.
+          if [ "${{ steps.mode.outputs.mode }}" = "morning" ]; then
+            python -m data.balldontlie crosswalk
+          fi
+          python -m data.balldontlie ingest $DATE_ARG
+
+      - name: Regenerate Goose dashboard
+        continue-on-error: true
+        run: |
+          DATE_ARG=""
+          if [ -n "${{ inputs.date }}" ]; then
+            DATE_ARG="--date ${{ inputs.date }}"
+          fi
+          # results mode regenerates with whichever date the production
+          # dashboard used (today's run picks up newly-graded picks for the
+          # Season Tracker tab).
+          python output/goose_dashboard.py $DATE_ARG
+
       - name: Save database artifact
         uses: actions/upload-artifact@v4
         with:
@@ -194,6 +230,12 @@ jobs:
         run: |
           mkdir -p _site
           cp output/mlb_picks.html _site/index.html
+          # Goose dashboard — soak alongside the existing dashboard. Lives at
+          # /goose.html so the existing URL is unchanged. Promote to index.html
+          # after the ~1 week soak period.
+          if [ -f output/goose_dashboard.html ]; then
+            cp output/goose_dashboard.html _site/goose.html
+          fi
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
