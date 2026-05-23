@@ -229,13 +229,18 @@ jobs:
       - name: Prepare Pages content
         run: |
           mkdir -p _site
-          cp output/mlb_picks.html _site/index.html
-          # Goose dashboard — soak alongside the existing dashboard. Lives at
-          # /goose.html so the existing URL is unchanged. Promote to index.html
-          # after the ~1 week soak period.
+          # Goose is now the default. The old MLB Picker dashboard stays at
+          # /legacy.html as a one-week rollback button. Delete the cp line
+          # below once the new one has soaked.
           if [ -f output/goose_dashboard.html ]; then
-            cp output/goose_dashboard.html _site/goose.html
+            cp output/goose_dashboard.html _site/index.html
+          else
+            # Failsafe: if the Goose render failed (continue-on-error in the
+            # earlier step would have swallowed the failure), fall back to
+            # the old dashboard so the site stays up.
+            cp output/mlb_picks.html _site/index.html
           fi
+          cp output/mlb_picks.html _site/legacy.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
