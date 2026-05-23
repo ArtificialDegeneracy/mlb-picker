@@ -20,10 +20,13 @@ import os
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import requests
+
+ET = ZoneInfo("America/New_York")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import get_current_season
@@ -261,9 +264,31 @@ def ingest_for_date(conn, date_str: str) -> Dict[str, int]:
 def _ingest_games_and_odds(session, conn, date_str, counts) -> List[dict]:
     """Pull today's games (in-memory map) + per-game odds (bdl_odds_today).
 
-    Returns the games list so downstream steps can build the player set.
+    balldontlie groups games by **UTC start date**, not ET game-day — a 9pm ET
+    night game starts ~01:00 UTC the next day, so `dates[]=D` from balldontlie
+    actually returns mostly games whose ET date is D-1, plus afternoon games
+    on D. To capture every game on the ET slate we want, we query both
+    D (catches matinee games) AND D+1 (catches the night games), then filter
+    in Python by ET date.
+
+    Returns the filtered games list so downstream steps can build the player
+    set.
     """
-    games = list(_paginate(session, "games", {"dates[]": date_str}))
+    target = datetime.strptime(date_str, "%Y-%m-%d").date()
+    next_utc = (target + timedelta(days=1)).strftime("%Y-%m-%d")
+    raw = list(_paginate(session, "games",
+                         {"dates[]": [date_str, next_utc]}))
+
+    games = []
+    for g in raw:
+        # balldontlie returns date as ISO with Z; convert to ET and compare.
+        try:
+            utc = datetime.fromisoformat(g["date"].replace("Z", "+00:00"))
+            et_date = utc.astimezone(ET).date()
+        except (KeyError, ValueError):
+            continue
+        if et_date == target:
+            games.append(g)
     counts["games"] = len(games)
     if not games:
         return []

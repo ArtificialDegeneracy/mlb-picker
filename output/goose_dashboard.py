@@ -832,7 +832,7 @@ def card_html(g, is_biggest=False):
         </div>
       </div>
       <div class="why-block">
-        <div class="why-head">Why Goose likes it</div>
+        <div class="why-head">Goose's Gander</div>
         <ul class="edges-list">{edges or '<li class="edge-empty">A quiet one — no standout edge.</li>'}</ul>
       </div>
       {edge_meter_html(g['modelPct'], g['vegasPct'])}
