@@ -1,9 +1,10 @@
 # balldontlie MLB API — Evaluation (Path B feature-expansion source)
 
-**Status:** PROBE NOT YET RUN — awaiting the 48-hour free trial.
+**Status:** TRIAL COMPLETE — verdict: **NO-BUY** (see Final recommendation).
 **Owner:** dan
 **Created:** 2026-05-21
-**Trial window:** _<fill in: trial start → start+48h>_
+**Trial window:** 2026-05-21 → 2026-05-23 (48h free trial of GOAT-tier endpoints at 5 req/min)
+**Completed:** 2026-05-22
 
 This doc evaluates whether the [balldontlie MLB API](https://www.balldontlie.io/)
 can supply richer, nonlinear features for the planned **Path B (XGBoost)** model.
@@ -48,6 +49,15 @@ logreg head-to-head.
 | `model/xgb_experiment.py` | logreg-vs-XGBoost comparison harness | yes — `--dry-run-synthetic` proves plumbing |
 
 The whole chain is built. The trial just runs it.
+
+> **Post-trial correction (2026-05-22):** the three `scratch/` scripts are
+> gitignored (`scratch/` is in `.gitignore`) — they exist on disk but are NOT
+> committed. `model/xgb_experiment.py` had a latent bug: it called
+> `build_training_features(..., return_dates=True)`, a kwarg that did not exist
+> — so the harness had never actually run end to end (not even `--dry-run`).
+> Fixed by adding the optional `return_dates` param to
+> `model/features.py:build_training_features` (pure addition, default False,
+> all existing callers unaffected).
 
 ---
 
@@ -106,12 +116,12 @@ before the window closes; start step 2 early.
 
 Answer these FIRST — they gate everything below.
 
-| # | Question | Why it's decisive | Answer (fill after probe) |
+| # | Question | Why it's decisive | Answer (filled 2026-05-22) |
 |---|----------|-------------------|---------------------------|
-| 1 | **Historical depth** — do `/players/versus` and the pitch-type endpoints have data back to **2022**? | The model trains on 2022–2024 (7,287 games). Any feature without 2022–2024 data is **inference-only** — usable for live picks but it cannot be a training feature, which sharply limits its value for an XGBoost rebuild. | _TBD_ |
-| 2 | **Rate-limit reality** — at 60 req/min (Paid $9.99 tier), can a daily refresh add these features without blowing the GitHub Actions cron window? | The `lineup_lock` path already makes ~270 player calls/run. New per-player endpoints multiply that. If a feature needs a call per starter + per lineup batter, that's 2 starters + ~18 batters = ~20 calls/game × 15 games = **~300 calls/day** just for one feature. | _TBD_ |
-| 3 | **Field completeness** — does the API actually return `xwoba`, populated H2H samples, etc., or are fields frequently null for non-star players? | A feature that's null for 40% of the player pool forces a fallback path and weakens the signal. | _TBD_ |
-| 4 | **`xwoba` coverage** — is `xwoba` populated for enough of the player pool to be usable, or only high-volume players? | `xwoba` (Statcast-derived) is the single most valuable field balldontlie exposes that the current sources don't. If it only exists for stars, the arsenal-matchup feature is not viable. | _TBD_ |
+| 1 | **Historical depth** — do `/players/versus` and the pitch-type endpoints have data back to **2022**? | The model trains on 2022–2024 (7,287 games). Any feature without 2022–2024 data is **inference-only** — usable for live picks but it cannot be a training feature, which sharply limits its value for an XGBoost rebuild. | **Endpoints DO have 2022 data** — `pitcher_pitch_type_season_stats?season=2022` returns rows. BUT the trial ingest (`scratch/balldontlie_ingest.py`) is hard-scoped to `seasons:[2022]`→ in practice ran `[2026]` only, plus the 40 backtest games. So the `bdl_*` cache holds **2026 data only**. A 2022–2024 backfill is ~3,000+ calls and was not run inside the 48h window. Net: as loaded, every staged feature is **inference-only**. |
+| 2 | **Rate-limit reality** | The `lineup_lock` path already makes ~270 player calls/run. | **Trial rate is 5 req / 24s — far harsher than the doc's "5 req/min" assumption.** Confirmed live: `x-ratelimit-limit:5`, `x-ratelimit-reset` ~24s out, `retry-after:23` on a 429. The full ingest took 1,179 calls; the backtest 1,069 calls over ~3.7 hrs. A daily production refresh of all features (~600 calls/day, doc §"call-volume") would need the All-Star tier (60 req/min) to fit a cron window. |
+| 3 | **Field completeness** | A feature null for 40% of the pool forces a fallback. | **xwoba/woba frequently null on low-volume rows** (confirmed in raw responses — null even on a real sampled row). `slg` is always populated; `feature_staging.QUALITY_FIELD_CHAIN` (xwoba→woba→slg) already anticipates this and degrades gracefully. H2H samples are thin this early in 2026: avg 81 total H2H AB/game across ~12.7 batters. |
+| 4 | **`xwoba` coverage** | If `xwoba` only exists for stars, the arsenal-matchup feature is not viable. | **Effectively not viable as loaded.** The arsenal features (`arsenal_xwoba_diff`, `starter_whiff_diff`, `arsenal_diversity_diff`, `arsenal_matchup_score`) were populated on only 36–79 of 473 scored 2026 games and scored **0.0000 XGBoost importance** on the 2026 populated-sample test — too sparse for the model to split on. |
 
 ### Known integration cost discovered before the trial
 
@@ -122,8 +132,11 @@ balldontlie-ID crosswalk**, refreshed as rosters change. The probe resolves IDs
 via `/mlb/v1/players?search=` and `/mlb/v1/teams` — record below how reliable
 that resolution is (exact-match rate, fuzzy/ambiguous cases).
 
-ID-resolution reliability (fill after probe): _TBD — e.g. "N/N players resolved
-exact, M fuzzy"_
+ID-resolution reliability (filled 2026-05-22): **396/414 players resolved
+(378 exact, 18 fuzzy); 29/30 teams resolved exact.** ~4% of players unresolved
+— acceptable. Teams crosswalk cleanly by abbreviation (note: balldontlie uses
+`CHW` for the White Sox vs the project's `CWS`; the ID-keyed `bdl_id_map`
+sidesteps this). Crosswalk lives in the `bdl_id_map` table.
 
 ---
 
@@ -139,15 +152,15 @@ exact, M fuzzy"_
 
 ## Results table — per endpoint (fill after probe)
 
-| Endpoint | Works? (HTTP) | Fields present vs. spec | Earliest season w/ data | Latency | Rate-limit headroom | Verdict |
-|----------|---------------|-------------------------|-------------------------|---------|---------------------|---------|
-| `/season_stats` (WAR, QS) | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _training / inference-only / not usable_ |
-| `/players/versus` (batter-vs-team H2H) | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| `/pitcher_pitch_type_season_stats` (arsenal: xwoba, whiff) | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| `/hitter_pitch_type_season_stats` (lineup vs pitch type) | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| `/players/splits` (pitcher splits, monthly form) | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| `/player_injuries` (structured injuries) | _TBD_ | _TBD_ | n/a (current) | _TBD_ | _TBD_ | _TBD_ |
-| `/plate_appearances` (Statcast pitch detail) | not probed live¹ | — | — | — | — | _offline-backfill only — see below_ |
+| Endpoint | Works? (HTTP) | Fields present vs. spec | Earliest season w/ data | Rate-limit headroom | Verdict |
+|----------|---------------|-------------------------|-------------------------|---------------------|---------|
+| `/season_stats` (WAR, QS) | ✅ 200 | full — `pitching_qs`, `pitching_gs`, `pitching_war`, `batting_war`, embedded player+team object | 2022 returns rows (only 2026 ingested) | OK — paginated, ~16 calls/season | **inference-only as loaded** — `starter_qs_rate_diff` got nonzero importance but no lift |
+| `/players/versus` (batter-vs-team H2H) | ✅ 200 | `at_bats`, `hits`, `ops` etc. present | 2026 only ingested | poor — singular `player_id`, ~18 calls/game, no batch | **inference-only** — moderate residual r but loses disagreement cases (33%) |
+| `/pitcher_pitch_type_season_stats` (arsenal: xwoba, whiff) | ✅ 200 | `xwoba`/`woba` frequently null on low-volume rows; `slg`/`whiff_percent` present | 2022 returns rows | OK — chunked by `player_ids[]`, ~16 calls/season | **not usable as loaded** — too sparse, 0.0 importance |
+| `/hitter_pitch_type_season_stats` (lineup vs pitch type) | ✅ 200 | same shape as pitcher endpoint | 2022 returns rows | OK — chunked, ~16 calls/season | **not usable as loaded** — feeds `arsenal_matchup_score`, 0.0 importance |
+| `/players/splits` (pitcher splits, monthly form) | ✅ 200 | categories: `byArena`, `byBreakdown`, `byDayMonth`, `byOpponent`, `split`. **NO vs-RHP/vs-LHP handedness split** — `byBreakdown` is Home/Away/Day/Night only | 2026 only ingested | OK — singular `player_id`, starters only | **partial fail** — pitcher platoon split impossible; recent-form rows not captured by the ingest (0 populated) |
+| `/player_injuries` (structured injuries) | ✅ 200 | `status`, `return_date`, `type`, embedded player+team | n/a (current snapshot) | cheap — batchable | usable for damping, but not a model input; minor |
+| `/plate_appearances` (Statcast pitch detail) | not probed live¹ | — | — | — | _offline-backfill only — not pursued_ |
 
 ¹ `/plate_appearances` is deliberately **not** in the probe: one call per game,
 large payload, the most rate-limit-expensive endpoint. It is not a live-feature
@@ -279,8 +292,8 @@ the model. The backtest measures **incremental** signal: signal the current
 
 | Candidate feature | [1] residual r | [2] max collinearity | [3] disagree win% | Populated n / sample | Verdict |
 |-------------------|----------------|----------------------|-------------------|----------------------|---------|
-| `arsenal_xwoba_diff` | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _build / skip / inconclusive_ |
-| `h2h_ops_diff` (full lineup-weighted)¹ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| `arsenal_xwoba_diff` | −0.480 (strong, n=11) | **0.718 vs team_quality_diff** — FAILS [2] | only 3 disagreement cases — unreadable | 11 / 40 | **SKIP** — strong raw r but redundant with `team_quality_diff` (the 5/18 killer pattern, 0.74–0.92). And only populated on 11/40 games. |
+| `h2h_ops_diff` (full lineup-weighted)¹ | −0.161 (moderate, n=39) | 0.235 (acceptably independent) — passes [2] | 5/15 = **33.3%** — FAILS [3] (below coin flip) | 39 / 40 | **SKIP** — clears collinearity but following it would flip picks *away* from correct answers. No incremental edge. |
 
 ¹ `h2h_ops_diff` is the **full lineup-weighted** version — every batter in both
 stored lineups, AB-weighted (batters with more shared H2H history count more).
@@ -290,12 +303,40 @@ endpoint has no batch param). At the trial's 5 req/min a 40-game backtest is
 2026 games that have full stored lineups, which cover ≈2026-04-12..05-05 — so
 the result speaks to April/early-May 2026, not the whole season.
 
-H2H sample-depth note (fill after run): _avg total H2H at-bats/game = TBD._ If
-this is low (<40), many batter-vs-team pairs simply lack shared history this
-early in 2026 and the feature is thin regardless of its correlation score.
+H2H sample-depth note (filled 2026-05-22): **avg 81 total H2H at-bats/game
+across avg 12.7 batters with any H2H history.** Above the 40-AB thinness floor
+in aggregate, but spread across ~12.7 batters that is ~6 AB per batter-vs-team
+pair — individually thin. One of 40 games had no H2H data at all.
 
-Current-model baseline accuracy on the backtest sample: _TBD_ (compare to the
-68.2% / 62% figures in CLAUDE.md to confirm the sample is representative).
+Current-model baseline accuracy on the backtest sample: **62.5%** (40 scored
+2026 games with full lineups, mean |residual| 0.463). Consistent with the 62%
+threshold figure in CLAUDE.md — sample is representative.
+
+### XGBoost head-to-head (model/xgb_experiment.py, 2026-05-22)
+
+The definitive test — train logreg and XGBoost on identical data, same
+chronological holdout. Two runs:
+
+**Run A — full 2022-2026 (10,188 games).** The `bdl_*` cache holds 2026 data
+only, so staged features were constant 0.0 on all training + holdout games →
+all 10 scored 0.0000 importance. Result: XGBoost 57.4% vs logreg 57.1%
+(+0.3%, within noise), Brier slightly worse. **This run tested plumbing only**,
+not feature value — staged features were absent on every evaluated game.
+
+**Run B — 2026 populated-sample (180 games where ≥1 staged feature is real).**
+The honest test. 135 train / 45 holdout, all within 2026:
+
+| Model | Features | Accuracy | Brier |
+|-------|----------|----------|-------|
+| Logistic regression | 5 production | **71.1%** | **0.2045** |
+| XGBoost | 5 production + 8 staged | 68.9% | 0.2375 |
+
+Adding the staged features made the model **worse on both metrics**. XGBoost
+importance on Run B: `h2h_ops_diff` 0.13, `h2h_sample_size` 0.12,
+`starter_qs_rate_diff` 0.12, `lineup_platoon_edge` 0.06 — nonzero but not
+helpful; the 4 arsenal features stayed 0.0000 even here (too sparse, 36–79/473
+games). The 45-game holdout is small (noisy), but the direction is clear: **no
+lift, and a Brier regression.**
 
 ---
 
@@ -348,25 +389,70 @@ the free tier may suffice for a nightly job.
 
 ---
 
-## Final recommendation — BUY / NO-BUY (write after both scripts)
+## Final recommendation — **NO-BUY** (decided 2026-05-22)
 
-_The trial succeeds if it produces a defensible answer to this, on evidence:_
+The trial produced a defensible answer, on evidence: **do not subscribe.**
 
-**Buy if:** at least one candidate feature scores [1] ≥0.15, [2] <0.7, [3] >50%
-in the backtest **and** the cheapest sufficient tier is justified by the number
-of features that passed. The data being "richer" is not, on its own, a reason
-to buy — the 5/18 experiment is the standing counter-example.
+The buy bar was: at least one candidate feature scores [1] ≥0.15, [2] <0.7,
+[3] >50% in the backtest. **Zero of the two backtested features clear all
+three:**
 
-**No-buy if:** every candidate feature is negligible/redundant (the 5/18
-outcome repeats), or the only features with signal are inference-only (no 2022
-depth) *and* the live-only lift doesn't justify a monthly cost.
+- `arsenal_xwoba_diff` — strong raw residual r (−0.480) but **fails [2]**:
+  collinearity 0.718 with `team_quality_diff`. This is the exact 2026-05-18
+  failure mode (the killers then were 0.74–0.92). Also populated on only 11/40
+  games.
+- `h2h_ops_diff` — clears collinearity (0.235) but **fails [3]**: on the 15
+  games where it disagrees with the current pick, following it wins 33.3% —
+  *below a coin flip*. It would actively move picks toward wrong answers.
 
-Complete after the trial:
+The XGBoost head-to-head confirms it independently: on the 180-game 2026
+populated sample, adding all 8 staged features made the model **worse** (68.9%
+vs 71.1% accuracy, Brier 0.238 vs 0.205). The four marquee arsenal/xwoba
+features — the core Path B motivation — scored 0.0000 importance even there.
 
-1. _Which candidate features passed the backtest (the [1]/[2]/[3] table)._
-2. _Which passing features are training-eligible (2022+ data) vs inference-only._
-3. _The cheapest tier that clears the call volume of the passing features only._
-4. _Whether the offline `/plate_appearances` xwoba backfill is worth pursuing
-   (only relevant if pitch-type season data lacks 2022 depth)._
-5. _The concrete feature list + tier to commit to when XGBoost work begins,
-   or an explicit NO-BUY with the numbers that justify it._
+### Why no-buy, in one paragraph
+
+balldontlie's MLB data is real, clean, and broad — but it does not carry
+*incremental* signal the 5-feature model lacks. The two features with the best
+raw correlation are each disqualified: one is redundant with `team_quality_diff`,
+the other points the wrong way on disagreement. This is the **2026-05-18
+experiment repeating** (bullpen/wRC+/platoon were also real, clean, and useless
+because collinear). On top of that, the trial ingest landed **2026 data only** —
+so even the features that aren't disqualified are inference-only; using them
+would mean a 2022–2024 backfill (~3,000+ calls) before they could be training
+features, with no evidence the payoff exists. The richer data is not, on its
+own, a reason to pay a monthly fee.
+
+### Answers to the trial's closing questions
+
+1. **Which features passed the backtest?** None. `arsenal_xwoba_diff` fails
+   collinearity [2]; `h2h_ops_diff` fails disagreement win-rate [3].
+2. **Training-eligible vs inference-only?** Moot — none passed. As loaded, *all*
+   staged features are inference-only (2026 cache only). The endpoints do return
+   2022 data, so a backfill is *possible*, but not justified given (1).
+3. **Cheapest sufficient tier?** N/A — no-buy. (For reference: a daily refresh
+   of all features ≈600 calls/day would need All-Star, $9.99/sport/mo; the trial
+   rate of 5 req/24s is far too slow for a production cron.)
+4. **`/plate_appearances` xwoba backfill?** Not worth pursuing. The cheaper
+   pitch-type season endpoints already expose 2022 data; the arsenal features
+   built on them showed no model value, so a more expensive Statcast backfill
+   would not change the verdict.
+5. **Concrete decision:** **NO-BUY.** Keep the MLB Stats API + FanGraphs stack.
+   The XGBoost harness, `feature_staging.py`, and the `bdl_*` schema stay in the
+   tree as scaffolding (cost nothing, empty cache → neutral fallbacks) in case a
+   future, genuinely-orthogonal data source appears worth testing. The Path B
+   bet — that tree-model interactions on richer features beat the linear
+   ceiling — was tested fairly and did not pay off with this source.
+
+### Trial mechanics notes (for any future re-test)
+
+- Trial rate limit is **5 req / 24s**, not the "5 req/min" the doc originally
+  assumed. Budget accordingly — the ingest + backtest together used ~2,250 calls
+  over ~7.5 hrs of wall time.
+- `scratch/balldontlie_ingest.py` is hard-scoped to the backtest game pool +
+  2026. A real training-feature evaluation needs it re-run per season for
+  2022–2024 — a multi-hour job per season at trial rate.
+- `model/xgb_experiment.py` trains on 2022-2026; running it against a 2026-only
+  cache silently produces an all-zero staged-feature matrix (Run A above). Scope
+  the evaluation to seasons the cache actually covers, or the result is a
+  plumbing test masquerading as a feature test.

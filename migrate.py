@@ -16,6 +16,14 @@ COLUMN_MIGRATIONS = [
     ("games", "weather_temp", "INTEGER"),
     ("games", "weather_wind", "TEXT"),
     ("games", "weather_condition", "TEXT"),
+    # Per-day balldontlie snapshots — without game_date the dashboard would
+    # serve stale data after day 1. home_team/away_team on bdl_odds_today let
+    # the dashboard join by matchup without going through bdl_id_map.
+    ("bdl_odds_today", "game_date", "TEXT"),
+    ("bdl_odds_today", "home_team", "TEXT"),
+    ("bdl_odds_today", "away_team", "TEXT"),
+    ("bdl_batting_today", "game_date", "TEXT"),
+    ("bdl_form_today", "game_date", "TEXT"),
 ]
 
 # Standalone table migrations (CREATE TABLE statements that should run on existing DBs).
@@ -122,6 +130,60 @@ TABLE_MIGRATIONS_EXTRA = [
             PRIMARY KEY (player_id, season)
         )
     """),
+    # Per-day balldontlie snapshots — mirror db.py:SCHEMA exactly.
+    ("bdl_odds_today", """
+        CREATE TABLE IF NOT EXISTS bdl_odds_today (
+            bdl_game_id INTEGER,
+            game_date TEXT,
+            home_team TEXT,
+            away_team TEXT,
+            vendor TEXT,
+            moneyline_home_odds INTEGER,
+            moneyline_away_odds INTEGER,
+            total_value REAL,
+            total_over_odds INTEGER,
+            total_under_odds INTEGER,
+            spread_home_value REAL,
+            spread_home_odds INTEGER,
+            updated_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (bdl_game_id, vendor, game_date)
+        )
+    """),
+    ("bdl_batting_today", """
+        CREATE TABLE IF NOT EXISTS bdl_batting_today (
+            player_id INTEGER,
+            game_date TEXT,
+            full_name TEXT,
+            team TEXT,
+            gp INTEGER,
+            avg REAL,
+            obp REAL,
+            slg REAL,
+            ops REAL,
+            hr INTEGER,
+            rbi INTEGER,
+            sb INTEGER,
+            war REAL,
+            updated_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (player_id, game_date)
+        )
+    """),
+    ("bdl_form_today", """
+        CREATE TABLE IF NOT EXISTS bdl_form_today (
+            player_id INTEGER,
+            game_date TEXT,
+            season_ops REAL,
+            season_ab INTEGER,
+            last7_ops REAL,
+            last7_ab INTEGER,
+            last15_ops REAL,
+            last15_ab INTEGER,
+            last30_ops REAL,
+            last30_ab INTEGER,
+            updated_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (player_id, game_date)
+        )
+    """),
     # Champion/challenger shadow picks — isolated from the production `picks`
     # table. Mirror db.py:SCHEMA exactly.
     ("shadow_picks", """
@@ -165,6 +227,9 @@ INDEX_MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_bdl_pitch_type_season ON bdl_pitch_type_stats(season, role)",
     "CREATE INDEX IF NOT EXISTS idx_bdl_splits_player ON bdl_player_splits(player_id, season)",
     "CREATE INDEX IF NOT EXISTS idx_shadow_picks_date ON shadow_picks(pick_date, model_version)",
+    "CREATE INDEX IF NOT EXISTS idx_bdl_odds_today_date ON bdl_odds_today(game_date)",
+    "CREATE INDEX IF NOT EXISTS idx_bdl_batting_today_date ON bdl_batting_today(game_date)",
+    "CREATE INDEX IF NOT EXISTS idx_bdl_form_today_date ON bdl_form_today(game_date)",
 ]
 
 

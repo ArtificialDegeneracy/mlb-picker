@@ -1,0 +1,264 @@
+/* ============================================================
+   Goose's Projection System — Colors & Type
+   ------------------------------------------------------------
+   A rugged sports-pub design system. The mood is a Largo, FL
+   bar at 7pm: dark wood, brass rail, a chalkboard of lines, a
+   sweating pint of Guinness on a coaster, a TV humming MLB
+   Tonight in the corner.
+   ============================================================ */
+
+/* -- Webfonts -----------------------------------------------
+   Display:  Ultra            (Google) — chunky slab, matches the logo
+   Headline: Oswald           (Google) — sports broadcast condensed
+   Chalk:    Permanent Marker (Google) — chalkboard betting board
+   Stats:    Roboto Mono      (Google) — odds, money lines, tickers
+   Body:     Source Sans 3    (Google) — clean UI body
+   --------------------------------------------------------- */
+@import url("https://fonts.googleapis.com/css2?family=Ultra&family=Oswald:wght@400;500;600;700&family=Permanent+Marker&family=Roboto+Mono:wght@400;500;700&family=Source+Sans+3:wght@400;500;600;700&display=swap");
+
+:root {
+  /* ---- BASE PALETTE ---- */
+  /* The 'wood & stout' core. */
+  --stout:          #0c0a08;   /* pure pub black — Guinness body */
+  --tar:            #161310;   /* slightly lifted black */
+  --pitch:          #1f1a14;   /* card/panel surface */
+  --oak:            #2a221a;   /* deep wood grain */
+  --walnut:         #3a2e22;   /* lighter wood */
+  --rail:           #4a3a2a;   /* brass rail shadow */
+
+  /* Brass / gold — the trim that frames everything. */
+  --brass:          #c9a24a;   /* primary gold */
+  --brass-bright:   #e6c073;   /* highlight gold */
+  --brass-deep:     #8c6e2c;   /* aged brass shadow */
+
+  /* Parchment / foam — the "cream" of a Guinness head, also coaster paper. */
+  --foam:           #f3e9c9;   /* primary cream / parchment */
+  --foam-bright:    #fff7df;   /* lifted cream */
+  --foam-dim:       #d9cda8;   /* faded coaster */
+  --paper:          #efe6d0;   /* coaster body */
+
+  /* Chalkboard — for the betting board. */
+  --chalkboard:     #1a2620;   /* deep green-black slate */
+  --chalkboard-2:   #243530;   /* lifted slate */
+  --chalk:          #ece7d4;   /* chalk stroke */
+  --chalk-dim:      #b8b09a;   /* erased chalk */
+
+  /* Accents — sport & pub semantics. */
+  --pub-red:        #8a2a2a;   /* oxblood — losses, alerts */
+  --pub-red-bright: #c44848;   /* lifted alert */
+  --shamrock:       #1f6b3a;   /* Irish green — wins, "lock", patch field */
+  --shamrock-bright:#3a9a5c;   /* highlight green */
+  --shamrock-deep:  #143d22;   /* patch field deep green */
+  --neon-on:        #f0c14a;   /* "live" indicator (TV glow) */
+  --steel:          #6c8aa8;   /* TV-glow blue — model bars, OPS, info */
+  --steel-bright:   #8eb0d4;   /* lifted steel */
+  --ember:          #d97a4e;   /* hot/vulnerability orange-red */
+
+  /* ---- SEMANTIC TOKENS ---- */
+  /* Surfaces */
+  --bg:             var(--stout);
+  --bg-elevated:    var(--pitch);
+  --bg-card:        var(--oak);
+  --bg-inset:       var(--tar);
+  --bg-chalk:       var(--chalkboard);
+  --bg-coaster:     var(--paper);
+
+  /* Foreground / text */
+  --fg1:            var(--foam);          /* primary text on dark */
+  --fg2:            var(--foam-dim);      /* secondary text on dark */
+  --fg3:            #8a8170;              /* tertiary, captions */
+  --fg-on-light:    var(--stout);         /* primary on coaster */
+  --fg-on-light-2:  var(--oak);           /* secondary on coaster */
+  --fg-accent:      var(--brass);         /* gold accent text */
+  --fg-accent-2:    var(--brass-bright);
+
+  /* Lines & borders */
+  --line:           rgba(201, 162, 74, 0.28);
+  --line-strong:    var(--brass);
+  --line-dim:       rgba(243, 233, 201, 0.10);
+  --hairline:       rgba(243, 233, 201, 0.06);
+
+  /* Status */
+  --win:            var(--shamrock);
+  --win-fg:         var(--shamrock-bright);
+  --loss:           var(--pub-red);
+  --loss-fg:        var(--pub-red-bright);
+  --push:           var(--foam-dim);
+  --live:           var(--neon-on);
+
+  /* ---- TYPE FAMILIES ---- */
+  --font-display:   "Ultra", "Alfa Slab One", "Rockwell", Georgia, serif;
+  --font-headline:  "Oswald", "Bebas Neue", "Impact", sans-serif;
+  --font-chalk:     "Permanent Marker", "Marker Felt", cursive;
+  --font-stats:     "Roboto Mono", "SFMono-Regular", Menlo, monospace;
+  --font-body:      "Source Sans 3", "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+
+  /* ---- TYPE SCALE (px) ---- */
+  --t-display-xl:   88px;   /* hero "BETTING AND PINTS" */
+  --t-display-lg:   64px;
+  --t-display-md:   44px;
+  --t-h1:           38px;
+  --t-h2:           28px;
+  --t-h3:           22px;
+  --t-h4:           18px;
+  --t-body:         16px;
+  --t-small:        14px;
+  --t-caption:      12px;
+  --t-micro:        10px;
+
+  /* ---- SPACING ---- */
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  24px;
+  --sp-6:  32px;
+  --sp-7:  48px;
+  --sp-8:  64px;
+  --sp-9:  96px;
+
+  /* ---- RADIUS ---- */
+  /* Pub world is mostly square, hard wood. Rounding is reserved
+     for coasters, pint glass rims, and pill chips. */
+  --r-0:   0;
+  --r-1:   2px;
+  --r-2:   4px;
+  --r-3:   8px;
+  --r-card: 6px;
+  --r-pill: 999px;
+
+  /* ---- SHADOWS ---- */
+  /* Layered to feel like things sitting on a varnished bar top. */
+  --shadow-coaster: 0 1px 0 rgba(0,0,0,0.5), 0 8px 18px rgba(0,0,0,0.55);
+  --shadow-card:    0 2px 0 #000, 0 12px 24px rgba(0,0,0,0.6);
+  --shadow-inset:   inset 0 1px 0 rgba(255,255,255,0.04), inset 0 -1px 0 rgba(0,0,0,0.6);
+  --shadow-brass:   0 0 0 1px var(--brass-deep), 0 0 0 2px rgba(201,162,74,0.25);
+  --glow-live:      0 0 0 2px rgba(240,193,74,0.25), 0 0 18px rgba(240,193,74,0.35);
+
+  /* ---- MOTION ---- */
+  --ease-pour:      cubic-bezier(.2,.7,.2,1);     /* heavy, settles */
+  --ease-snap:      cubic-bezier(.5,.05,.2,1);    /* dice clatter */
+  --dur-fast:       120ms;
+  --dur-base:       220ms;
+  --dur-slow:       400ms;
+  --dur-pour:       1400ms;  /* a Guinness pour takes 119.5s in real life. We cheat. */
+}
+
+/* ============================================================
+   SEMANTIC ELEMENT STYLES
+   Use as classes (.h1, .stat) or apply directly to elements.
+   ============================================================ */
+
+.display, .h-display {
+  font-family: var(--font-display);
+  font-weight: 400;            /* Ultra only ships 400 */
+  font-size: var(--t-display-xl);
+  line-height: 0.92;
+  letter-spacing: 0.005em;
+  color: var(--fg1);
+  text-transform: uppercase;
+  text-shadow: 0 2px 0 rgba(0,0,0,0.5);
+}
+
+.h1 {
+  font-family: var(--font-display);
+  font-size: var(--t-h1);
+  line-height: 1.02;
+  text-transform: uppercase;
+  letter-spacing: 0.01em;
+  color: var(--fg1);
+}
+
+.h2 {
+  font-family: var(--font-headline);
+  font-weight: 700;
+  font-size: var(--t-h2);
+  line-height: 1.1;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg1);
+}
+
+.h3 {
+  font-family: var(--font-headline);
+  font-weight: 600;
+  font-size: var(--t-h3);
+  line-height: 1.15;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg1);
+}
+
+.h4, .eyebrow {
+  font-family: var(--font-headline);
+  font-weight: 500;
+  font-size: var(--t-h4);
+  line-height: 1.2;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--fg-accent);
+}
+
+.p, .body {
+  font-family: var(--font-body);
+  font-weight: 400;
+  font-size: var(--t-body);
+  line-height: 1.55;
+  color: var(--fg2);
+}
+
+.small {
+  font-family: var(--font-body);
+  font-size: var(--t-small);
+  line-height: 1.5;
+  color: var(--fg2);
+}
+
+.caption {
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: var(--t-caption);
+  line-height: 1.4;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg3);
+}
+
+.stat, .odds, .money {
+  font-family: var(--font-stats);
+  font-weight: 500;
+  font-size: var(--t-h3);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--fg1);
+}
+
+.stat-big {
+  font-family: var(--font-stats);
+  font-weight: 700;
+  font-size: 56px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-accent);
+}
+
+.chalk {
+  font-family: var(--font-chalk);
+  font-weight: 400;
+  font-size: 32px;
+  line-height: 1.1;
+  color: var(--chalk);
+  letter-spacing: 0.02em;
+}
+
+.chalk-small {
+  font-family: var(--font-chalk);
+  font-size: 20px;
+  color: var(--chalk);
+}
+
+/* Selection */
+::selection {
+  background: var(--brass);
+  color: var(--stout);
+}

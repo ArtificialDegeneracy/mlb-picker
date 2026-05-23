@@ -71,15 +71,24 @@ def build_feature_vector(game_row, conn=None):
             db.__exit__(None, None, None)
 
 
-def build_training_features(start_year=2022, end_year=2025):
+def build_training_features(start_year=2022, end_year=2025, return_dates=False):
     """Build feature matrix and labels for all historical games.
 
+    Args:
+        start_year, end_year: inclusive season range to pull Final games from.
+        return_dates: when True, also return each game's game_date as a 4th
+            element — needed by callers that do a chronological train/holdout
+            split (model/xgb_experiment.py). Default False keeps the original
+            3-tuple contract for every existing caller.
+
     Returns:
-        (features_list, labels_list, game_ids_list)
+        (features_list, labels_list, game_ids_list) — or, when return_dates
+        is True, (features_list, labels_list, game_ids_list, dates_list).
     """
     features_list = []
     labels_list = []
     game_ids = []
+    dates = []
 
     with get_db() as conn:
         games = conn.execute("""
@@ -102,6 +111,7 @@ def build_training_features(start_year=2022, end_year=2025):
             features_list.append(feats)
             labels_list.append(1 if game["winner"] == "home" else 0)
             game_ids.append(game["game_id"])
+            dates.append(game["game_date"])
 
             if (i + 1) % 2000 == 0:
                 print(f"    {i + 1}/{len(games)} games processed...")
@@ -109,6 +119,8 @@ def build_training_features(start_year=2022, end_year=2025):
         if skipped:
             print(f"    Skipped {skipped} games with missing data")
 
+    if return_dates:
+        return features_list, labels_list, game_ids, dates
     return features_list, labels_list, game_ids
 
 

@@ -242,6 +242,61 @@ CREATE TABLE IF NOT EXISTS bdl_season_stats (
     PRIMARY KEY (player_id, season)
 );
 
+-- "_today" tables — per-day balldontlie snapshots populated by
+-- data/balldontlie.py:ingest_for_date. The game_date column is mandatory: the
+-- dashboard scopes its reads by game_date, otherwise day-2 reads serve stale
+-- day-1 rows. The PK includes game_date so re-ingest on the same day is
+-- idempotent (INSERT OR REPLACE) but different days coexist.
+CREATE TABLE IF NOT EXISTS bdl_odds_today (
+    bdl_game_id INTEGER,
+    game_date TEXT,            -- 'YYYY-MM-DD' — the slate this row belongs to
+    home_team TEXT,            -- project abbr (CWS not CHW)
+    away_team TEXT,            -- project abbr
+    vendor TEXT,
+    moneyline_home_odds INTEGER,
+    moneyline_away_odds INTEGER,
+    total_value REAL,
+    total_over_odds INTEGER,
+    total_under_odds INTEGER,
+    spread_home_value REAL,
+    spread_home_odds INTEGER,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (bdl_game_id, vendor, game_date)
+);
+
+CREATE TABLE IF NOT EXISTS bdl_batting_today (
+    player_id INTEGER,         -- balldontlie id
+    game_date TEXT,
+    full_name TEXT,
+    team TEXT,
+    gp INTEGER,
+    avg REAL,
+    obp REAL,
+    slg REAL,
+    ops REAL,
+    hr INTEGER,
+    rbi INTEGER,
+    sb INTEGER,
+    war REAL,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (player_id, game_date)
+);
+
+CREATE TABLE IF NOT EXISTS bdl_form_today (
+    player_id INTEGER,         -- balldontlie id
+    game_date TEXT,
+    season_ops REAL,
+    season_ab INTEGER,
+    last7_ops REAL,
+    last7_ab INTEGER,
+    last15_ops REAL,
+    last15_ab INTEGER,
+    last30_ops REAL,
+    last30_ab INTEGER,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (player_id, game_date)
+);
+
 CREATE INDEX IF NOT EXISTS idx_games_date ON games(game_date);
 CREATE INDEX IF NOT EXISTS idx_picks_date ON picks(pick_date);
 CREATE INDEX IF NOT EXISTS idx_picks_game_id ON picks(game_id);
@@ -252,6 +307,9 @@ CREATE INDEX IF NOT EXISTS idx_bdl_id_map_bdl ON bdl_id_map(bdl_id, entity_type)
 CREATE INDEX IF NOT EXISTS idx_bdl_pitch_type_season ON bdl_pitch_type_stats(season, role);
 CREATE INDEX IF NOT EXISTS idx_bdl_splits_player ON bdl_player_splits(player_id, season);
 CREATE INDEX IF NOT EXISTS idx_shadow_picks_date ON shadow_picks(pick_date, model_version);
+CREATE INDEX IF NOT EXISTS idx_bdl_odds_today_date ON bdl_odds_today(game_date);
+CREATE INDEX IF NOT EXISTS idx_bdl_batting_today_date ON bdl_batting_today(game_date);
+CREATE INDEX IF NOT EXISTS idx_bdl_form_today_date ON bdl_form_today(game_date);
 """
 
 
