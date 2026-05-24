@@ -18,7 +18,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.mlb_api import get_pitcher_season_stats
-from data.fip import compute_fip_from_stats
+from data.fip import compute_fip_from_stats, get_fip_constant_for_season, update_fip_constant_from_api
 from db import get_db
 
 
@@ -82,6 +82,12 @@ def main():
     print(f"\nFetching... (~0.4s per pitcher, ETA ~{len(missing) * 0.4 / 60:.1f} min)")
     fetched, failed, no_data = 0, 0, 0
     with get_db() as conn:
+        # Ensure FIP constant cache covers every season we're about to write.
+        seasons_to_cache = sorted({yr for (_, yr, _) in missing})
+        print(f"  Refreshing FIP constants for seasons {seasons_to_cache}...")
+        for yr in seasons_to_cache:
+            update_fip_constant_from_api(yr, conn)
+
         for i, (pid, year, name) in enumerate(missing):
             try:
                 stats = get_pitcher_season_stats(pid, year)
@@ -97,7 +103,8 @@ def main():
             # The API helper may return data from a different season if requested
             # season has no data. We want to insert under the year we asked for —
             # the season the game was played in — so the historical lookup is right.
-            fip = compute_fip_from_stats(stats)
+            fip_constant = get_fip_constant_for_season(year, conn)
+            fip = compute_fip_from_stats(stats, fip_constant=fip_constant)
 
             conn.execute("""
                 INSERT OR IGNORE INTO pitcher_stats

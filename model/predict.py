@@ -235,6 +235,23 @@ def predict_games(date_str, run_type="morning"):
             else:
                 confidence = "LEAN"
 
+            # LEAN-flip: 471 historical LEAN picks at 45.9% accuracy (below coin flip).
+            # In the 0.48-0.52 home_win_prob band the model is genuinely anti-calibrated.
+            # Contest requires a pick every game, so flipping the LEAN pick is +3.5pp
+            # overall vs status quo. Audit trail preserved via pick_flipped column.
+            pick_flipped = 0
+            if confidence == "LEAN":
+                home_win_prob = 1 - home_win_prob
+                if home_win_prob >= 0.5:
+                    predicted_winner = game["home_team"]
+                    pick_prob = home_win_prob
+                else:
+                    predicted_winner = game["away_team"]
+                    pick_prob = 1 - home_win_prob
+                pick_flipped = 1
+                logger.info(f"  LEAN-flip: {game['away_team']} @ {game['home_team']} — "
+                            f"contrarian pick {predicted_winner} @ {pick_prob:.0%}")
+
             pick = {
                 "game_id": game["game_id"],
                 "pick_date": date_str,
@@ -249,17 +266,18 @@ def predict_games(date_str, run_type="morning"):
                 "pick_prob": round(pick_prob, 4),
                 "confidence": confidence,
                 "opener_flag": opener_flag,
+                "pick_flipped": pick_flipped,
             }
             picks.append(pick)
 
             # Save to DB
             conn.execute("""
                 INSERT OR REPLACE INTO picks
-                (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence, opener_flag)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence, opener_flag, pick_flipped)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 game["game_id"], date_str, run_type,
-                predicted_winner, round(home_win_prob, 4), confidence, opener_flag,
+                predicted_winner, round(home_win_prob, 4), confidence, opener_flag, pick_flipped,
             ))
 
         # Sort by confidence level then probability
@@ -302,7 +320,10 @@ def print_predictions(picks, date_str, run_type="morning"):
     print(f"  High-confidence picks: {high_count} | Total games: {len(picks)}")
     opener_games = [p for p in picks if p.get("opener_flag")]
     if opener_games:
-        print(f"  ⚠ Opener detected in {len(opener_games)} game(s) — confidence dampened")
+        print(f"  Opener detected in {len(opener_games)} game(s) — confidence dampened")
+    flipped = [p for p in picks if p.get("pick_flipped")]
+    if flipped:
+        print(f"  LEAN-flip applied to {len(flipped)} contrarian pick(s)")
     print()
 
 
