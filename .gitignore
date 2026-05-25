@@ -8,6 +8,8 @@ mlb_picker.db-wal
 mlb.db
 logs/
 output/mlb_picks.html
+output/goose_dashboard.html
+output/goose_dashboard_test.html
 model/retrain_report.json
 model/xgb_experiment_report.json
 model/archive/

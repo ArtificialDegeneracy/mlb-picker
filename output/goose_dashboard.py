@@ -23,6 +23,8 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import get_current_season
 from db import get_db
+from output.goose_props import (gather_prop_board, gather_prop_edges_for_game,
+                                K_OVER_THRESHOLD, K_UNDER_THRESHOLD)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(HERE, "assets", "goose")
@@ -442,6 +444,10 @@ def assemble_games(date_str, season):
                                   home: g["home_starter_name"]},
             }
             entry["edges"] = derive_edges(entry)
+            # Prop edges — display-only commentary surfaced in the expanded
+            # card section, separate from the winner-pick edge typing above.
+            entry["prop_edges"] = gather_prop_edges_for_game(
+                conn, g, season, date_str)
             games.append(entry)
     return games
 
@@ -779,6 +785,262 @@ def arsenal_html(name, abbr, arsenal):
             f'<span class="exp-pitcher-team"> · {abbr}</span></div>{body}</div>')
 
 
+# --- prop edges rendering (per-card + slate-wide Prop Board tab) ----------
+
+_PROP_KIND_LABEL = {
+    "HR": "HR",
+    "HITS": "Hits/TB",
+    "K-OVER": "K's · over",
+    "K-UNDER": "K's · under",
+}
+
+
+# Unicode minus from the design handoff — used for the lineup-order chip.
+_MINUS = "−"
+
+
+# --- chalk tally-mark glyph -------------------------------------------------
+#
+# The matchup-quality chip on the chalkboard. Hand-drawn chalk tally marks —
+# `tier` of them solid (strong) strokes, the remaining strokes dotted/light
+# to show "out of 5." Intentionally DIFFERENT from the 5-pint confidence
+# indicator used on moneyline picks: that one implies "this pick will win,"
+# the matchup chip only implies "this is among the better matchups on the
+# board." The visual difference matters: tally marks read as a count, not a
+# guarantee.
+
+def chalk_tally_row(tier, height=16):
+    """Five chalk strokes — `tier` of them solid (strong), the rest dotted.
+
+    Each stroke is a short slightly-rotated vertical line, like keeping count
+    on a chalkboard. Rotated and offset by index so they look hand-drawn, not
+    typeset. SVG path: each stroke is two lines at slight angles to feel like
+    a chalk stroke rather than a typeset pipe.
+    """
+    parts = []
+    width = 6
+    for i in range(5):
+        on = i < tier
+        # Tiny stroke-angle jitter so the five marks aren't perfectly parallel.
+        angle = (-2, 3, -1, 4, -3)[i]
+        color_class = "tally-on" if on else "tally-off"
+        opacity = 1.0 if on else 0.35
+        stroke = "1.6" if on else "1.0"
+        dash = "" if on else 'stroke-dasharray="2 2"'
+        parts.append(
+            f'<svg class="ctally {color_class}" width="{width}" '
+            f'height="{height}" viewBox="0 0 6 16">'
+            f'<line x1="3" y1="2" x2="3" y2="14" '
+            f'stroke="currentColor" stroke-width="{stroke}" '
+            f'stroke-linecap="round" {dash} opacity="{opacity}" '
+            f'transform="rotate({angle} 3 8)"/></svg>')
+    return f'<span class="ctally-row">{"".join(parts)}</span>'
+
+
+# Backward-compatible alias for any caller that imported the old name.
+chalk_pint_row = chalk_tally_row
+
+
+# --- per-card prop edges panel (in-card Breadcrumbs) -----------------------
+
+def _prop_edge_row_html(e):
+    """Per-card 'Prop Edges' panel row — pub-card aesthetic. Uses the same
+    matchup-quality tally chip the chalkboard board uses (NOT the moneyline
+    Flying-V pints) so the visual reminds the user this is matchup ranking,
+    not outcome prediction."""
+    kind = e["kind"]
+    kind_class = ("prop-kind-hr" if kind == "HR"
+                  else "prop-kind-hits" if kind == "HITS"
+                  else "prop-kind-kover" if kind == "K-OVER"
+                  else "prop-kind-kunder")
+    why = e.get("why") or ""
+    tier = e.get("tier", e.get("pints", 1))
+    tier_label = e.get("tier_label") or e.get("pint_label") or ""
+    tally = chalk_tally_row(tier, height=14)
+    return f"""<li class="prop-edge-row {kind_class}">
+      <span class="prop-edge-kind">{_PROP_KIND_LABEL.get(kind, kind)}</span>
+      <span class="prop-edge-body">
+        <span class="prop-edge-primary">{e['primary']}</span>
+        <span class="prop-edge-secondary">{e['secondary']}</span>
+        {f'<span class="prop-edge-why">{why}</span>' if why else ''}
+        <span class="prop-edge-tier">{tally}<span class="prop-edge-tier-label">{tier_label}</span></span>
+      </span>
+    </li>"""
+
+
+# --- chalkboard table renderers --------------------------------------------
+
+def _tier_cell(c):
+    """Render the matchup-quality cell — tally marks above a small label."""
+    tier = c.get("tier", c.get("pints", 1))
+    label = c.get("tier_label") or c.get("pint_label") or ""
+    return (f'<td class="cb-cell-tier">'
+            f'{chalk_tally_row(tier)}'
+            f'<span class="cb-tier-label">{label}</span>'
+            f'</td>')
+
+
+def _batter_row_html(c):
+    """One <tr> for a batter prop table (HR / Hits-TB). Columns:
+    Matchup · Player · Matchup · Why."""
+    order = (f' <span class="cb-order">{_MINUS}#{c["order"]}</span>'
+             if c.get("order") else "")
+    return f"""<tr class="cb-row">
+      {_tier_cell(c)}
+      <td class="cb-cell-player">
+        <span class="cb-name">{c.get("batter", "—")}</span>{order}
+        <span class="cb-team">{c.get("bat_team", "")}</span>
+      </td>
+      <td class="cb-cell-matchup">
+        <span class="cb-vs">vs</span> {c.get("opp_starter", "?")}
+        <span class="cb-game">{c.get("matchup", "")}</span>
+      </td>
+      <td class="cb-cell-why">{c.get("why", "")}</td>
+    </tr>"""
+
+
+def _k_row_html(c):
+    """One <tr> for the K-leans table. Columns:
+    Matchup · Direction · Pitcher · Matchup · Why."""
+    direction = c.get("direction", "neutral")
+    dir_class = ("cb-dir-over" if direction == "OVER"
+                 else "cb-dir-under" if direction == "UNDER"
+                 else "cb-dir-neutral")
+    return f"""<tr class="cb-row">
+      {_tier_cell(c)}
+      <td class="cb-cell-direction">
+        <span class="cb-dir {dir_class}">{direction}</span>
+      </td>
+      <td class="cb-cell-player">
+        <span class="cb-name">{c.get("pitcher", "—")}</span>
+        <span class="cb-team">{c.get("pitcher_team", "")}</span>
+      </td>
+      <td class="cb-cell-matchup">
+        <span class="cb-vs">vs</span> {c.get("opp_team", "?")} lineup
+        <span class="cb-game">{c.get("matchup", "")}</span>
+      </td>
+      <td class="cb-cell-why">{c.get("why", "")}</td>
+    </tr>"""
+
+
+def _batter_table_html(rows, empty_msg):
+    if not rows:
+        return f'<div class="cb-empty">{empty_msg}</div>'
+    body = "".join(_batter_row_html(r) for r in rows)
+    return f"""<table class="cb-table cb-table-batter">
+      <thead>
+        <tr>
+          <th class="cb-th-tier">Matchup</th>
+          <th class="cb-th-player">Player</th>
+          <th class="cb-th-matchup">Facing</th>
+          <th class="cb-th-why">Why</th>
+        </tr>
+      </thead>
+      <tbody>{body}</tbody>
+    </table>"""
+
+
+def _k_table_html(rows, empty_msg):
+    if not rows:
+        return f'<div class="cb-empty">{empty_msg}</div>'
+    body = "".join(_k_row_html(r) for r in rows)
+    return f"""<table class="cb-table cb-table-k">
+      <thead>
+        <tr>
+          <th class="cb-th-tier">Matchup</th>
+          <th class="cb-th-dir">Lean</th>
+          <th class="cb-th-player">Pitcher</th>
+          <th class="cb-th-matchup">Facing</th>
+          <th class="cb-th-why">Why</th>
+        </tr>
+      </thead>
+      <tbody>{body}</tbody>
+    </table>"""
+
+
+def _chalkboard_card(title: str, subtitle: str, table_html: str) -> str:
+    """A single chalkboard card — title + subtitle in chalk, then the body
+    table on the slate. Matches the design handoff's chalkboard primitive
+    (oak frame, slate surface, chalked title with -1deg rotation)."""
+    return f"""<section class="chalkboard chalkboard-card">
+      <div class="cb-head">
+        <div class="cb-title">{title}</div>
+        <div class="cb-subtitle">{subtitle}</div>
+      </div>
+      <div class="cb-rule"></div>
+      {table_html}
+    </section>"""
+
+
+def prop_board_html(board):
+    """Render the slate-wide Prop Board as three chalkboard cards (HR, Hits/TB,
+    K leans), each containing a 4-or-5-column table. Plus a chalk-styled
+    explainer card at the top and a small footer with pool counts.
+    """
+    if board.get("reason"):
+        return f"""<section class="chalkboard">
+          <div class="cb-title">No lines yet</div>
+          <div class="cb-rule"></div>
+          <div class="cb-empty">{board['reason']}</div>
+        </section>"""
+
+    t = board.get("totals", {})
+
+    # Compact one-line explainer — sits just above the cards, no chalkboard
+    # surface of its own. Big "How to read this board" toggle expands to the
+    # longer copy on demand.
+    explainer = """<details class="prop-explainer">
+      <summary class="prop-explainer-summary">
+        <span class="prop-explainer-eyebrow">Matchup rankings</span>
+        <span class="prop-explainer-line">
+          Each card below ranks tonight&rsquo;s best matchups for one prop &mdash;
+          hints, not guarantees.
+        </span>
+        <span class="prop-explainer-toggle">How to read &rsaquo;</span>
+      </summary>
+      <div class="prop-explainer-body">
+        <p><strong>Matchup tally:</strong> 5 chalk strokes show how the matchup
+        ranks across the whole slate. More strokes = better matchup signal.
+        <em>It is NOT a probability that a HR / hit / K total will land.</em></p>
+        <p><strong>Batter cards:</strong> we&rsquo;re looking at how well the
+        hitter handles the pitch types the opposing starter throws most often,
+        whether his bat is hot lately, and his season power profile.</p>
+        <p><strong>Pitcher card:</strong> <em>OVER</em> = pitcher misses bats
+        AND opposing lineup whiffs (K-rich spot). <em>UNDER</em> = contact
+        pitcher facing a contact lineup (low-K spot).</p>
+        <p class="cb-caveat">A hint, not a guarantee. Sample sizes are
+        real-season-small. Wet the beak responsibly.</p>
+      </div>
+    </details>"""
+
+    hr_card = _chalkboard_card(
+        "Tonight&rsquo;s HR spots",
+        "Best home-run upside matchups across the slate.",
+        _batter_table_html(board.get("hr", []),
+                           "No standout HR spots tonight."))
+    hits_card = _chalkboard_card(
+        "Tonight&rsquo;s hit spots",
+        "Best hit / total-bases matchups across the slate.",
+        _batter_table_html(board.get("hits_tb", []),
+                           "No standout hit spots tonight."))
+    k_card = _chalkboard_card(
+        "Tonight&rsquo;s K leans",
+        "Strikeout over/under leans by starter.",
+        _k_table_html(board.get("k", []),
+                      "No standout K leans tonight."))
+
+    footer = f"""<section class="chalkboard chalkboard-foot">
+      <div class="cb-footer">
+        {t.get("games", 0)} games &middot;
+        {t.get("hr_pool", 0)} HR candidates &middot;
+        {t.get("hits_pool", 0)} hits candidates &middot;
+        {t.get("k_pool", 0)} K candidates
+      </div>
+    </section>"""
+
+    return "\n".join([explainer, hr_card, hits_card, k_card, footer])
+
+
 def card_html(g, is_biggest=False):
     conf_slug = g["confidence"].lower().replace(" ", "-")
     # the design's pill classes differ from the rail slug
@@ -795,6 +1057,17 @@ def card_html(g, is_biggest=False):
           <h3 class="exp-title"><span class="exp-icon">🏥</span>Injury Notes</h3>
           <ul class="il-list">{il_items}</ul>
         </section>""" if il_items else "")
+    # Prop edges panel — surfaces strongest batter/pitcher prop matchups for
+    # this game from the bdl_*_today cache. Display-only commentary, NOT a
+    # model input.
+    prop_edges = g.get("prop_edges") or []
+    prop_section = ""
+    if prop_edges:
+        prop_items = "".join(_prop_edge_row_html(e) for e in prop_edges)
+        prop_section = (f"""<section class="exp-section prop-edges-section">
+          <h3 class="exp-title"><span class="exp-icon">🎯</span>Prop Edges</h3>
+          <ul class="prop-edges-list">{prop_items}</ul>
+        </section>""")
     af, hf = g["_form"][g["away"]], g["_form"][g["home"]]
 
     total_chip = ""
@@ -867,6 +1140,7 @@ def card_html(g, is_biggest=False):
             <ul class="hitter-list">{home_bats or '<li class="hitter-empty">no batting data</li>'}</ul>
           </div>
         </section>
+        {prop_section}
         {il_section}
       </div>
     </article>"""
@@ -951,7 +1225,7 @@ def _edge_pts(g):
     return abs(g["modelPct"] - g["vegasPct"])
 
 
-def render(games, season, date_str):
+def render(games, season, date_str, prop_board):
     # which game carries the biggest edge — flagged on its own card
     biggest = max(games, key=_edge_pts, default=None)
     top_edge = _edge_pts(biggest) if biggest else 0
@@ -987,7 +1261,8 @@ def render(games, season, date_str):
         season_acc=f"{season['acc'] * 100:.1f}",
         season_rec=season_rec, streak_txt=streak_txt, streak_cls=streak_cls,
         fv_acc=fv_acc, gs_mood=gs_mood, gs_line=gs_line,
-        cards=cards, season=season_html(season))
+        cards=cards, season=season_html(season),
+        prop_board=prop_board_html(prop_board))
 
 
 # --- page template ---------------------------------------------------------
@@ -1892,6 +2167,376 @@ body {
   font-family: var(--font-body); font-style: italic; font-size: 13px;
   color: var(--fg3); text-align: center; padding: 24px;
 }
+
+/* ============================================================
+   PROP EDGES (per-card expanded section)
+   Display layer over the bdl_*_today cache. Stays in the pub-card
+   aesthetic so the nested block doesn't clash with its parent card.
+   The standalone Prop Board tab uses the chalkboard treatment below.
+   ============================================================ */
+
+.prop-edges-section .exp-title .exp-icon { filter: hue-rotate(-20deg); }
+.prop-edges-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.prop-edge-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px 10px;
+  background: rgba(0,0,0,0.22);
+  border: 1px solid var(--hairline); border-radius: 3px;
+  border-left: 3px solid var(--brass);
+}
+.prop-edge-row.prop-kind-hr      { border-left-color: var(--shamrock-bright); }
+.prop-edge-row.prop-kind-hits    { border-left-color: var(--brass-bright); }
+.prop-edge-row.prop-kind-kover   { border-left-color: var(--steel-bright); }
+.prop-edge-row.prop-kind-kunder  { border-left-color: var(--ember); }
+.prop-edge-kind {
+  flex-shrink: 0; min-width: 60px;
+  font-family: var(--font-headline); font-weight: 800;
+  font-size: 9px; letter-spacing: .14em; text-transform: uppercase;
+  padding: 4px 8px; border-radius: 2px;
+  background: rgba(201,162,74,0.12); color: var(--brass-bright);
+  border: 1px solid rgba(201,162,74,0.35); text-align: center; line-height: 1;
+}
+.prop-kind-hr .prop-edge-kind     { background: rgba(31,107,58,0.22); color: var(--shamrock-bright); border-color: rgba(58,154,92,0.5); }
+.prop-kind-hits .prop-edge-kind   { background: rgba(201,162,74,0.16); color: var(--brass-bright); border-color: rgba(201,162,74,0.5); }
+.prop-kind-kover .prop-edge-kind  { background: rgba(108,138,168,0.20); color: var(--steel-bright); border-color: rgba(142,176,212,0.5); }
+.prop-kind-kunder .prop-edge-kind { background: rgba(217,138,78,0.20); color: var(--ember); border-color: rgba(217,138,78,0.45); }
+.prop-edge-body {
+  display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1;
+}
+.prop-edge-primary {
+  font-family: var(--font-body); font-size: 13.5px; font-weight: 700;
+  color: var(--foam); line-height: 1.25;
+}
+.prop-edge-secondary {
+  font-family: var(--font-body); font-size: 11px;
+  color: var(--fg3); line-height: 1.3; letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.prop-edge-why {
+  font-family: var(--font-body); font-size: 13px; line-height: 1.45;
+  color: var(--foam-dim); margin-top: 2px;
+}
+.prop-edge-tier {
+  display: inline-flex; align-items: center; gap: 8px; margin-top: 4px;
+  color: var(--brass-bright);
+}
+.prop-edge-tier-label {
+  font-family: var(--font-headline); font-weight: 700;
+  font-size: 9px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--brass);
+}
+
+/* ============================================================
+   PROP BOARD — chalkboard surface (design handoff)
+   ------------------------------------------------------------
+   Slate-green chalkboard on an oak frame, hung on the pub wall.
+   Permanent Marker chalk for all text on the chalkboard surface.
+   Brass numbers for the score (matches the design's price-in-brass
+   convention from the betting-lines variant of the chalkboard).
+   ============================================================ */
+
+.intro-sub {
+  font-family: var(--font-body); font-size: 12.5px; line-height: 1.5;
+  color: var(--fg2); margin: 0 0 18px; max-width: 38em;
+}
+
+.prop-board {
+  padding: 4px 0 16px;
+  display: flex; flex-direction: column; gap: 22px;
+}
+
+/* Compact one-line explainer above the cards. Renders as a <details> so the
+   long-form copy is one-tap available without dominating the page. Closed by
+   default; the summary row sits as a thin chalk-styled strip. */
+.prop-explainer {
+  margin: -6px 0 -4px;
+  padding: 10px 14px;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(255,255,255,0.025), transparent 60%),
+    var(--chalkboard);
+  border-left: 2px solid var(--brass-deep);
+  border-radius: 2px;
+}
+.prop-explainer[open] { padding-bottom: 14px; }
+.prop-explainer-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px;
+  color: var(--chalk);
+}
+.prop-explainer-summary::-webkit-details-marker { display: none; }
+.prop-explainer-eyebrow {
+  font-family: var(--font-headline);
+  font-weight: 700; font-size: 9px;
+  letter-spacing: .18em; text-transform: uppercase;
+  color: var(--brass);
+  flex-shrink: 0;
+}
+.prop-explainer-line {
+  font-family: var(--font-chalk);
+  font-size: 14px; line-height: 1.35;
+  color: var(--chalk-dim);
+  flex: 1; min-width: 0;
+}
+.prop-explainer-toggle {
+  font-family: var(--font-headline);
+  font-weight: 700; font-size: 9px;
+  letter-spacing: .12em; text-transform: uppercase;
+  color: var(--brass-bright);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.prop-explainer[open] .prop-explainer-toggle::after {
+  content: " (close)";
+}
+.prop-explainer-body {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(236,231,212,0.18);
+  font-family: var(--font-chalk);
+  font-size: 14px; line-height: 1.5;
+  color: var(--chalk);
+}
+.prop-explainer-body p { margin: 0 0 8px; }
+.prop-explainer-body p:last-child { margin-bottom: 0; }
+.prop-explainer-body strong {
+  color: var(--brass);
+  font-weight: 400;
+  font-family: var(--font-chalk);
+}
+.prop-explainer-body em {
+  color: var(--chalk-dim);
+  font-style: italic;
+}
+.prop-explainer-body .cb-caveat {
+  font-size: 12.5px; color: var(--chalk-dim);
+  border-top: 1px dashed rgba(236,231,212,0.18);
+  padding-top: 8px; margin-top: 4px;
+}
+
+/* The chalkboard surface — slate green, oak frame, inset shadow,
+   subtle radial highlights so it reads as a physical board hung on a wall. */
+.chalkboard {
+  background:
+    radial-gradient(circle at 30% 20%, rgba(255,255,255,0.04), transparent 60%),
+    radial-gradient(circle at 70% 80%, rgba(255,255,255,0.03), transparent 50%),
+    var(--chalkboard);
+  border: 8px solid var(--oak);
+  border-radius: var(--r-2);
+  padding: 18px 22px 22px;
+  box-shadow:
+    inset 0 0 60px rgba(0,0,0,0.5),
+    0 1px 0 rgba(0,0,0,0.5),
+    0 10px 20px rgba(0,0,0,0.55);
+  position: relative;
+}
+
+/* Chalk dust at the edges — purely cosmetic; doesn't impede the read. */
+.chalkboard::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background:
+    radial-gradient(ellipse at 0% 100%, rgba(236,231,212,0.015), transparent 30%),
+    radial-gradient(ellipse at 100% 0%, rgba(236,231,212,0.012), transparent 30%);
+}
+
+/* Card head: title + subtitle stacked in chalk. Subtitle gives the user a
+   one-line "what's in this card" prose so they don't have to learn columns. */
+.cb-head { margin-bottom: 4px; }
+
+.cb-title {
+  font-family: var(--font-chalk);
+  font-size: 28px; line-height: 1.05;
+  color: var(--chalk);
+  transform: rotate(-1deg);
+  display: inline-block;
+  border-bottom: 2px solid var(--chalk);
+  padding-bottom: 2px;
+}
+.cb-subtitle {
+  margin-top: 8px;
+  font-family: var(--font-chalk);
+  font-size: 14px; line-height: 1.35;
+  color: var(--chalk-dim);
+}
+
+.cb-rule {
+  border-bottom: 1px dashed rgba(236,231,212,0.3);
+  margin: 8px 0 10px;
+}
+
+/* Tables sit directly on the slate (no extra panel). Borders are dashed
+   chalk lines between rows, not solid pixel rules. */
+.cb-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 6px;
+  font-family: var(--font-chalk);
+}
+
+.cb-table thead th {
+  font-family: var(--font-headline);
+  font-weight: 600; font-size: 10px; letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--chalk-dim);
+  text-align: left;
+  padding: 4px 10px 8px;
+  border-bottom: 1px dashed rgba(236,231,212,0.3);
+}
+.cb-table thead th.cb-th-tier   { width: 130px; }
+.cb-table thead th.cb-th-dir    { width: 78px; text-align: center; }
+.cb-table thead th.cb-th-player { width: 22%; }
+.cb-table thead th.cb-th-matchup { width: 26%; }
+.cb-table thead th.cb-th-why { }
+
+.cb-row td {
+  padding: 12px 10px;
+  vertical-align: middle;
+  border-bottom: 1px dashed rgba(236,231,212,0.10);
+}
+.cb-row:last-child td { border-bottom: 0; }
+.cb-row:hover td { background: rgba(236,231,212,0.025); }
+
+.cb-cell-tier {
+  white-space: nowrap;
+  vertical-align: middle;
+  color: var(--chalk);
+}
+.cb-cell-tier .ctally-row {
+  display: inline-flex; gap: 4px; align-items: center;
+  color: var(--chalk);
+}
+.cb-tier-label {
+  display: block;
+  font-family: var(--font-chalk);
+  font-size: 13px;
+  color: var(--chalk-dim);
+  margin-top: 4px;
+  letter-spacing: 0.01em;
+}
+
+.cb-cell-player {
+  font-family: var(--font-chalk);
+  font-size: 19px;
+  color: var(--chalk);
+  line-height: 1.15;
+}
+.cb-cell-player .cb-name { color: var(--chalk); }
+.cb-cell-player .cb-team {
+  display: block;
+  font-family: var(--font-headline);
+  font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--chalk-dim); margin-top: 3px;
+}
+.cb-cell-player .cb-order {
+  color: var(--chalk-dim); font-size: 14px;
+  font-family: var(--font-chalk);
+}
+
+.cb-cell-matchup {
+  font-family: var(--font-chalk);
+  font-size: 17px;
+  color: var(--chalk-dim);
+  line-height: 1.2;
+}
+.cb-cell-matchup .cb-vs {
+  font-family: var(--font-chalk);
+  color: var(--chalk-dim);
+  font-size: 14px;
+}
+.cb-cell-matchup .cb-game {
+  display: block;
+  font-family: var(--font-headline);
+  font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--brass); margin-top: 3px;
+}
+
+.cb-cell-why {
+  font-family: var(--font-chalk);
+  font-size: 14.5px; line-height: 1.4;
+  color: var(--chalk);
+}
+
+.cb-cell-direction { text-align: center; }
+.cb-dir {
+  font-family: var(--font-chalk);
+  font-size: 16px;
+  padding: 2px 8px;
+  border: 2px solid currentColor;
+  border-radius: 2px;
+  transform: rotate(-1deg); display: inline-block;
+  line-height: 1.1;
+  letter-spacing: .04em;
+}
+.cb-dir-over    { color: var(--shamrock-bright); }
+.cb-dir-under   { color: var(--ember); }
+.cb-dir-neutral { color: var(--chalk-dim); }
+
+.cb-empty {
+  font-family: var(--font-chalk); font-size: 18px;
+  color: var(--chalk-dim); text-align: center;
+  padding: 24px 0 8px;
+  transform: rotate(-0.5deg);
+}
+
+/* Chalk tally marks — hand-drawn vertical strokes (see chalk_tally_row() in
+   Python). Filled strokes take the chalk color at full opacity; empty strokes
+   are chalk-dim with a dashed line, like a fading first stroke that hasn't
+   been completed yet. Each mark is also slightly rotated at the source so the
+   five marks don't read as a typeset bar code. */
+.ctally { display: inline-block; vertical-align: middle; }
+.ctally-row { display: inline-flex; gap: 4px; align-items: center; }
+.ctally.tally-on { color: var(--chalk); }
+.ctally.tally-off { color: var(--chalk-dim); }
+
+/* Explainer chalkboard at the top — chalk paragraph variant. */
+.chalkboard-note .cb-note {
+  font-family: var(--font-chalk);
+  font-size: 16px; line-height: 1.5;
+  color: var(--chalk);
+}
+.chalkboard-note .cb-note p { margin: 0 0 10px; }
+.chalkboard-note .cb-note p:last-child { margin-bottom: 0; }
+.chalkboard-note .cb-key {
+  color: var(--brass);
+  font-family: var(--font-chalk);
+}
+.chalkboard-note .cb-caveat {
+  font-size: 14px; color: var(--chalk-dim); margin-top: 8px;
+  border-top: 1px dashed rgba(236,231,212,0.25);
+  padding-top: 8px;
+}
+
+/* Footer chalkboard — small chalked metadata strip. */
+.chalkboard-foot {
+  padding: 10px 22px;
+}
+.chalkboard-foot .cb-footer {
+  font-family: var(--font-chalk);
+  font-size: 13px; color: var(--chalk-dim);
+  text-align: center;
+  letter-spacing: .02em;
+}
+
+/* Narrow viewport — shrink the title and tighten the table. The chalkboard
+   surface intentionally does NOT collapse to stacked cards on mobile (per
+   the design handoff: "the chalkboard metaphor breaks if the columns wrap").
+   Instead the matchup column hides its small game label and the why column
+   becomes the dominant cell. */
+@media (max-width: 600px) {
+  .chalkboard { padding: 14px 14px 18px; }
+  .cb-title { font-size: 22px; }
+  .cb-subtitle { font-size: 13px; }
+  .cb-table thead th { font-size: 9px; }
+  .cb-table thead th.cb-th-tier { width: 108px; }
+  .cb-row td { padding: 10px 6px; }
+  .cb-cell-player { font-size: 16px; }
+  .cb-cell-matchup { font-size: 14px; }
+  .cb-cell-why { font-size: 13px; }
+  .cb-cell-matchup .cb-game { display: none; }
+}
 """
 
 _PAGE = """<!doctype html>
@@ -1923,6 +2568,7 @@ _PAGE = """<!doctype html>
 
   <nav class="tabs">
     <button class="tab-btn is-active" data-tab="tonight">Tonight's Slate</button>
+    <button class="tab-btn" data-tab="props">Prop Board</button>
     <button class="tab-btn" data-tab="season">Season Tracker</button>
   </nav>
 
@@ -1951,6 +2597,15 @@ _PAGE = """<!doctype html>
         </div>
       </section>
       <section class="feed">{cards}</section>
+    </div>
+
+    <div class="tab-panel" id="tab-props">
+      <section class="intro">
+        <div class="intro-eyebrow"><span class="intro-dot"></span>Tonight's Slate &middot; Prop Board</div>
+        <h1 class="intro-title">Where the <span class="gold">edge</span><br>shows up.</h1>
+        <p class="intro-sub">Batter-vs-pitcher matchup signals from balldontlie. Display only &mdash; no model wiring. Sample-gated arsenal xRV, last-15 form, season power. K leans use weighted whiff% &times; opposing lineup vulnerability.</p>
+      </section>
+      <div class="prop-board">{prop_board}</div>
     </div>
 
     <div class="tab-panel" id="tab-season">
@@ -2003,16 +2658,22 @@ def generate_goose_dashboard(date_str=None, output_path=None):
 
     games = assemble_games(date_str, season)
     season_data = season_tracker(season)
-    html = render(games, season_data, date_str)
+    prop_board = gather_prop_board(date_str, season)
+    html = render(games, season_data, date_str, prop_board)
 
     with open(output_path, "w") as f:
         f.write(html)
 
     edge_games = [g for g in games if g["vegasPct"] is not None]
     total_edges = sum(len(g["edges"]) for g in games)
+    total_props = sum(len(g.get("prop_edges") or []) for g in games)
+    pb_t = prop_board.get("totals", {}) if prop_board else {}
     print(f"  Goose dashboard saved to {output_path}")
     print(f"  {len(games)} games, {len(edge_games)} with a Vegas line, "
           f"{total_edges} typed edges")
+    print(f"  Prop edges: {total_props} per-card; board pools "
+          f"HR={pb_t.get('hr_pool', 0)} Hits={pb_t.get('hits_pool', 0)} "
+          f"K={pb_t.get('k_pool', 0)}")
     return output_path
 
 
