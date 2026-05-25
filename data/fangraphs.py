@@ -1,6 +1,7 @@
 """FanGraphs API client for team-level wRC+ and bullpen ERA."""
 
 import logging
+import time
 from datetime import datetime, timedelta
 
 import requests
@@ -24,10 +25,41 @@ FANGRAPHS_ABBR_MAP = {
     "SDP": "SD", "SFG": "SF", "TBR": "TB", "WSN": "WSH",
 }
 
+# Plausibility bounds — values outside these are rejected as bad data rather
+# than persisted. Observed 2026-05-09 bug: NYY+SF bullpen_era stuck at 0.0
+# for 9+ days, inflating their bullpen signal. ERA of 0 is implausible for
+# any MLB bullpen across a season; wRC+ of 0 means a team didn't score in
+# any tracked PAs, also implausible.
+BULLPEN_ERA_MIN = 0.5     # below this = bad data
+BULLPEN_ERA_MAX = 12.0    # above this = bad data
+WRC_PLUS_MIN = 30         # below this = bad data
+WRC_PLUS_MAX = 200        # above this = bad data
+
 
 def _normalize_abbr(fg_abbr):
     """Convert FanGraphs abbreviation to our standard abbreviation."""
     return FANGRAPHS_ABBR_MAP.get(fg_abbr, fg_abbr)
+
+
+def _http_get_with_retry(url, params, label, retries=3):
+    """GET with exponential backoff. FanGraphs intermittently returns 429/5xx;
+    silent failures here are how the platoon-splits columns went NULL for all
+    30 teams. Returns parsed JSON or None.
+    """
+    delay = 1.0
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, params=params, headers=FANGRAPHS_HEADERS, timeout=15)
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.RequestException, ValueError) as e:
+            if attempt < retries - 1:
+                logger.info(f"FanGraphs {label} attempt {attempt+1} failed ({e}); retry in {delay:.1f}s")
+                time.sleep(delay)
+                delay *= 2
+            else:
+                logger.warning(f"FanGraphs {label} failed after {retries} attempts: {e}")
+    return None
 
 
 def _fetch_team_stats(stats_type, season):
@@ -59,18 +91,8 @@ def _fetch_team_stats(stats_type, season):
         "pagenum": 1,
     }
 
-    try:
-        resp = requests.get(FANGRAPHS_API_BASE, params=params,
-                            headers=FANGRAPHS_HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("data", [])
-    except requests.RequestException as e:
-        logger.warning(f"FanGraphs API request failed ({stats_type}): {e}")
-        return []
-    except (ValueError, KeyError) as e:
-        logger.warning(f"FanGraphs API response parse failed ({stats_type}): {e}")
-        return []
+    data = _http_get_with_retry(FANGRAPHS_API_BASE, params, f"_fetch_team_stats({stats_type})")
+    return data.get("data", []) if data else []
 
 
 def get_team_wrc_plus(season=None):
@@ -78,19 +100,27 @@ def get_team_wrc_plus(season=None):
 
     Returns:
         Dict mapping team abbreviation → wRC+ value, or empty dict on failure.
+        Values outside [WRC_PLUS_MIN, WRC_PLUS_MAX] are rejected.
     """
     season = season or SEASON
     teams = _fetch_team_stats("bat", season)
 
     results = {}
+    rejected = []
     for team in teams:
         abbr = _normalize_abbr(team.get("TeamNameAbb", ""))
         wrc_plus = team.get("wRC+")
         if abbr and wrc_plus is not None:
             try:
-                results[abbr] = float(wrc_plus)
+                v = float(wrc_plus)
             except (ValueError, TypeError):
                 continue
+            if WRC_PLUS_MIN <= v <= WRC_PLUS_MAX:
+                results[abbr] = v
+            else:
+                rejected.append((abbr, v))
+    if rejected:
+        logger.warning(f"get_team_wrc_plus({season}): rejected implausible values: {rejected}")
     return results
 
 
@@ -103,6 +133,7 @@ def get_team_wrc_plus_vs_hand(hand, season=None):
 
     Returns:
         Dict mapping team abbreviation → wRC+ value vs that hand.
+        Values outside [WRC_PLUS_MIN, WRC_PLUS_MAX] are rejected.
     """
     season = season or SEASON
     # FanGraphs: month=13 is vs LHP, month=14 is vs RHP
@@ -115,24 +146,27 @@ def get_team_wrc_plus_vs_hand(hand, season=None):
         "pageitems": 2147483647, "pagenum": 1,
     }
 
-    try:
-        resp = requests.get(FANGRAPHS_API_BASE, params=params,
-                            headers=FANGRAPHS_HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json().get("data", [])
-    except (requests.RequestException, ValueError) as e:
-        logger.warning(f"FanGraphs platoon request failed (vs {hand}HP): {e}")
+    data = _http_get_with_retry(FANGRAPHS_API_BASE, params, f"platoon (vs {hand}HP)")
+    if not data:
         return {}
 
+    rows = data.get("data", [])
     results = {}
-    for team in data:
+    rejected = []
+    for team in rows:
         abbr = _normalize_abbr(team.get("TeamNameAbb", ""))
         wrc = team.get("wRC+")
         if abbr and wrc is not None:
             try:
-                results[abbr] = float(wrc)
+                v = float(wrc)
             except (ValueError, TypeError):
                 continue
+            if WRC_PLUS_MIN <= v <= WRC_PLUS_MAX:
+                results[abbr] = v
+            else:
+                rejected.append((abbr, v))
+    if rejected:
+        logger.warning(f"get_team_wrc_plus_vs_hand({hand}, {season}): rejected implausible: {rejected}")
     return results
 
 
@@ -141,19 +175,28 @@ def get_bullpen_era(season=None):
 
     Returns:
         Dict mapping team abbreviation → bullpen ERA value, or empty dict on failure.
+        Values outside [BULLPEN_ERA_MIN, BULLPEN_ERA_MAX] are rejected — observed
+        2026-05-09 bug had NYY+SF persistently at 0.0, inflating their bullpen signal.
     """
     season = season or SEASON
     teams = _fetch_team_stats("rel", season)
 
     results = {}
+    rejected = []
     for team in teams:
         abbr = _normalize_abbr(team.get("TeamNameAbb", ""))
         era = team.get("ERA")
         if abbr and era is not None:
             try:
-                results[abbr] = float(era)
+                v = float(era)
             except (ValueError, TypeError):
                 continue
+            if BULLPEN_ERA_MIN <= v <= BULLPEN_ERA_MAX:
+                results[abbr] = v
+            else:
+                rejected.append((abbr, v))
+    if rejected:
+        logger.warning(f"get_bullpen_era({season}): rejected implausible values: {rejected}")
     return results
 
 

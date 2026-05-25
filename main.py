@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from config import SEASON, TEAM_ID_TO_ABBR, REQUEST_DELAY
 from db import init_db, seed_priors, get_row_counts, get_db
 from data.mlb_api import get_schedule, get_pitcher_season_stats, get_all_team_records
-from data.fip import compute_fip_from_stats
+from data.fip import compute_fip_from_stats, get_fip_constant_for_season, update_fip_constant_from_api
 from data.fangraphs import refresh_fangraphs_stats
 
 logging.basicConfig(
@@ -87,6 +87,12 @@ def refresh_data(date_str, season=None):
                 g["home_score"], g["away_score"], g["winner"], g["status"],
             ))
 
+        # 3a. Refresh FIP constant cache for current and previous season (FIP cancels
+        # out in fip_diff but stays consistent within a single pitcher's stat row).
+        print("Refreshing FIP constants...")
+        update_fip_constant_from_api(season, conn)
+        update_fip_constant_from_api(season - 1, conn)
+
         # 3. Pull pitcher stats for all starters
         print("Fetching pitcher stats...")
         starter_ids = set()
@@ -106,9 +112,10 @@ def refresh_data(date_str, season=None):
                 logger.warning(f"  No stats for pitcher {pid} ({starter_names.get(pid, 'Unknown')})")
                 continue
 
-            fip = compute_fip_from_stats(stats)
-            name = starter_names.get(pid, "Unknown")
             actual_season = stats.get("actual_season", season)
+            fip_constant = get_fip_constant_for_season(actual_season, conn)
+            fip = compute_fip_from_stats(stats, fip_constant=fip_constant)
+            name = starter_names.get(pid, "Unknown")
 
             # Store under the actual season the data came from
             conn.execute("""
@@ -159,7 +166,8 @@ def refresh_data(date_str, season=None):
             for row in missing_prev:
                 prev_stats = get_pitcher_season_stats(row["player_id"], prev_season)
                 if prev_stats and prev_stats.get("actual_season") == prev_season and prev_stats["ip"] > 0:
-                    prev_fip = compute_fip_from_stats(prev_stats)
+                    prev_fip_constant = get_fip_constant_for_season(prev_season, conn)
+                    prev_fip = compute_fip_from_stats(prev_stats, fip_constant=prev_fip_constant)
                     conn.execute("""
                         INSERT OR IGNORE INTO pitcher_stats
                         (player_id, player_name, team, season, era, fip,

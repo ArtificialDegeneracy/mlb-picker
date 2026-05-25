@@ -27,19 +27,31 @@ data/
 model/
   features.py        Feature engineering (FEATURE_NAMES defines the model input)
   predict.py         Logistic regression training, prediction, opener detection
+  retrain.py         Weekly auto-retrain entry point (regression gate + PR creation)
 
 output/
   dashboard.py       HTML dashboard generator (Today's Picks, Season Tracker, Pick History)
 
 .github/workflows/
-  daily-picks.yml    GitHub Actions: 6 cron runs + manual dispatch with date override
+  daily-picks.yml      GitHub Actions: 6 cron runs + manual dispatch with date override
+  weekly-retrain.yml   Sunday 6am ET retrain, opens PR if regression gate passes
 ```
 
 ## Model
-- Logistic regression trained on 2022-2024 MLB data (~7,287 games)
-- Validated on 2025: 67.9% HIGH tier accuracy at 63% confidence threshold
-- Features: FIP differential, team quality (prior-blended), platoon wRC+, park factors, bullpen ERA, home flag
-- Opener detection: dampens confidence 40% toward 50% when listed starter has <10 career GS
+- Logistic regression trained on 2022-2024 MLB data (7,287 games)
+- Validated on 2025: 68.2% HIGH tier accuracy at 63% threshold (was 67.4% pre-away-overconfidence damping)
+- **5 features** (`FEATURE_NAMES` in `model/features.py`): `fip_diff`, `team_quality_diff`, `park_factor`, `home_offense_trend`, `away_offense_trend`
+- **wRC+ / bullpen ERA / platoon splits are NOT model inputs** — they feed the dashboard signal-tag system and the away-overconfidence damping rule only. Linear regression couldn't extract clean signal from them (r=0.74-0.92 collinear with team_quality), see TODO 2026-05-18.
+
+## Calibration stack
+The raw logreg probability is only the first stage. Each prediction passes through up to 5 post-model corrections, in this order:
+1. **Opener dampening** — if listed starter has <10 career GS, shrink (prob - 0.5) by 40%.
+2. **Away-overconfidence dampening** — for HIGH-tier away picks with 3+/5 supporting signals (record/FIP/bullpen/wrc/form), shrink toward 50% by 5/10/20% based on signal count. Shipped 2026-05-20.
+3. **Lineup-OPS nudge** (lineup_lock only) — `nudge = clip(home_ops - away_ops) * 0.40, ±0.04`, applied additively. Shipped 2026-05-20.
+4. **Weakened-lineup dampening** (lineup_lock only) — if a team is missing regulars and their lineup OPS is >4% below their 10-game rolling baseline, shrink (prob - 0.5) by 25%.
+5. **LEAN-flip** — if the final `pick_prob < 0.55` (LEAN tier), flip the pick to the opposite team. Historical evidence: 471 LEAN picks at 45.9% accuracy in 2026 (below coin flip); flipping gets 54.1%. Shipped 2026-05-20. Audit via the `picks.pick_flipped` column.
+
+`scheduler.py:run_lineup_lock` and `model/predict.py:predict_games` each re-implement this stack. They have drifted before (Bug 2: opener dampening missing from lineup_lock until 5/19) — keep them in sync.
 
 ## Daily Run Schedule (GitHub Actions)
 All times ET (crons are UTC, DST-adjusted for summer only):
@@ -59,15 +71,25 @@ Dashboard: https://artificialdegeneracy.github.io/mlb-picker/
 - **Early-season guard**: Team W-L records need 10+ games before blending with priors.
 - **Artifacts**: DB + model pkl files persist between GitHub Actions runs via upload/download artifacts. Seed files in `seed/` as fallback.
 
-## Known Issues (as of 2026-04-01)
-- SEASON is hardcoded to 2026 in config.py — needs to be dynamic
+## Known Issues (as of 2026-05-20)
 - Game time UTC→ET uses month approximation for DST (wrong March 1-13, late Oct)
 - GitHub Actions crons are DST-only — off by 1 hour Nov-Mar
-- Model is never retrained with in-season data
-- FIP constant hardcoded at 3.10, never recomputed
 - No doubleheader awareness (Game 2 treated same as Game 1)
-- Picks dedup logic varies across dashboard queries (one place uses MAX which is alphabetically wrong)
-- Missing DB indices on game_id, player_id, team_name
+- ~~Model is never retrained with in-season data~~ — stale, was already wired (see Recently fixed)
+- ~~FIP constant hardcoded at 3.10~~ — FIXED 2026-05-20 (see Recently fixed)
+- ~~SEASON is hardcoded to 2026~~ — stale, was already wired via `get_current_season()`. The Nov-Feb branch was dead code (returned current year regardless); FIXED 2026-05-20 to correctly return prior year in Jan / early Feb.
+- ~~Picks dedup uses MAX(run_type) somewhere~~ — stale, audited 2026-05-20: all 6 dashboard dedup queries use the documented `ORDER BY CASE ... LIMIT 1` pattern.
+- ~~Missing DB indices on game_id, player_id, team_name~~ — stale, audited 2026-05-20: all three indexed via primary keys or explicit indices; query plans confirm no table scans on the hot dashboard queries.
+
+## Recently fixed
+- 2026-05-20 — S2 sweep audit: three "known issues" turned out to be stale (picks dedup MAX, missing DB indices, SEASON hardcoded). All three were already fixed or never bugs in the first place; the SEASON note had one real bug embedded (`get_current_season()` Jan-Feb branch was dead code, would have returned wrong year during the offseason).
+- 2026-05-20 — LEAN-flip: contest requires picking every game; historical LEAN-tier picks were 45.9% accurate (below coin flip). Flipping yields 54.1%. Applied automatically in `model/predict.py:predict_games` and `scheduler.py:run_lineup_lock` after the rest of the calibration stack. Audit via `picks.pick_flipped` column. Dashboard shows a "Contrarian" badge.
+- 2026-05-20 — Retrain gate data leakage: the weekly retrain regression gate was using the last 20% of current season as holdout, but the production model was already trained on those games (commit date > holdout dates) → gate fired spuriously every week, blocking 4 consecutive retrains 5/10-5/19. Fix: use model file mtime as the time-walked cutoff. Validation = games AFTER production was trained; both models evaluated fairly. Skip gate when no time-walked window is available (no leakage advantage either way).
+- 2026-05-20 — Bug 4: FIP constant was hardcoded at 3.10. Added per-season `fip_constants` table, fixed broken `update_fip_constant_from_api` (missing SEASON import + no persistence), wired `get_fip_constant_for_season(season, conn)` into all 4 FIP write sites. Daily refresh now populates the cache. Observed range across 2022-2026: 3.10-3.25. The constant cancels in `fip_diff`, so existing model coefficients remain valid; the benefit is consistency when stats from different seasons appear in the same comparison.
+- 2026-05-20 — Bug 1: `scheduler.py` was writing lineup OPS into a feature key (`platoon_wrc_diff`) that wasn't in `FEATURE_NAMES`. Lineup OPS was silently discarded. Replaced with a post-model lineup-OPS nudge in the calibration stack.
+- 2026-05-20 — Bug 3: NYY+SF had `bullpen_era=0.0` stuck in the DB for 9+ days, inflating their bullpen signal. All 30 teams had NULL `wrc_plus_vs_lhp/vs_rhp` due to silent FanGraphs request failures. Added retry-with-backoff and plausibility bounds in `data/fangraphs.py`.
+- 2026-05-19 — Bug 2: `scheduler.py:run_lineup_lock` did not re-run opener detection. Now mirrors `predict_games`.
+- 2026-05-18 — Backfilled `pitcher_stats` for 2022-2024 (~26% of training games were falling through to FIP=4.0). FIP coefficient strengthened from -0.05 to -0.12.
 
 ## Important Context
 - Backfill runs for completed games have lookahead bias (team W-L includes game outcomes before predicting). Only run morning for future/same-day games.

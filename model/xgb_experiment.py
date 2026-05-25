@@ -85,17 +85,21 @@ ACCURACY_REGRESSION_LIMIT = 0.02
 # data assembly
 # ---------------------------------------------------------------------------
 
-def build_dataset(staged_feature_names, season):
+def build_dataset(staged_feature_names, season, start_year=2022):
     """
     Build the full feature matrix: the 5 production features + the requested
-    staged balldontlie features, for every Final game 2022..season.
+    staged balldontlie features, for every Final game start_year..season.
+
+    start_year defaults to 2022 (full history). Pass start_year=season for a
+    SEASON-ONLY run — required when the bdl_* cache only holds one season's
+    data, so the staged features aren't constant-0.0 across the training set.
 
     Returns (df, labels, dates) where df columns are
     FEATURE_NAMES + staged_feature_names, in that fixed order.
     """
-    print(f"  building production features (2022-{season})...")
+    print(f"  building production features ({start_year}-{season})...")
     feats, labels, game_ids, dates = build_training_features(
-        2022, season, return_dates=True)
+        start_year, season, return_dates=True)
 
     base_df = pd.DataFrame(feats)[FEATURE_NAMES]
 
@@ -111,8 +115,8 @@ def build_dataset(staged_feature_names, season):
         gid_set = set(game_ids)
         games_by_id = {
             g["game_id"]: g for g in conn.execute(
-                "SELECT * FROM games WHERE status='Final' "
-                "AND game_date >= '2022-01-01'")
+                "SELECT * FROM games WHERE status='Final' AND game_date >= ?",
+                (f"{start_year}-01-01",))
             if g["game_id"] in gid_set
         }
         for gid in game_ids:
@@ -246,6 +250,11 @@ def main():
                          "'none' for production-5-only. See "
                          "model/feature_staging.py:CANDIDATE_FEATURES.")
     ap.add_argument("--season", type=int, default=SEASON)
+    ap.add_argument("--season-only", action="store_true",
+                    help="Train + test on the current season ONLY. Use this "
+                         "when the bdl_* cache holds just one season's data — "
+                         "a full 2022-N run would leave the staged features "
+                         "constant-0.0 across most of the training set.")
     ap.add_argument("--holdout-frac", type=float, default=0.2)
     ap.add_argument("--max-depth", type=int, default=3)
     ap.add_argument("--n-estimators", type=int, default=200)
@@ -284,8 +293,14 @@ def main():
     print(f"\n  production features ({len(FEATURE_NAMES)}): {FEATURE_NAMES}")
     print(f"  staged features ({len(staged)}): {staged or '(none)'}")
 
-    # Build dataset.
-    df, labels, dates = build_dataset(staged, args.season)
+    # Build dataset. season-only restricts the training window to the season
+    # the bdl_* cache actually covers (see --season-only help).
+    start_year = args.season if args.season_only else 2022
+    if args.season_only:
+        print(f"\n  SEASON-ONLY MODE: training + testing on {args.season} "
+              "games only\n  (the bdl_* cache holds one season — a 2022-N run "
+              "would leave staged\n  features constant across most of the set).")
+    df, labels, dates = build_dataset(staged, args.season, start_year)
     all_features = list(df.columns)
     print(f"\n  dataset: {len(df)} games x {len(all_features)} features")
 

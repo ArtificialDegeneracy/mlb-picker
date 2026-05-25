@@ -9,7 +9,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import MLB_API_BASE, REQUEST_DELAY, TEAM_ID_TO_ABBR
 from data.mlb_api import _api_get, get_pitcher_season_stats
-from data.fip import compute_fip_from_stats
+from data.fip import compute_fip_from_stats, get_fip_constant_for_season, update_fip_constant_from_api
 from db import get_db
 
 logger = logging.getLogger(__name__)
@@ -124,6 +124,12 @@ def build_training_set(start_year=2022, end_year=2025):
             total_games += year_games
             print(f"    {year}: {year_games} games loaded")
 
+        # Populate FIP constant cache for each season we're about to load
+        seasons_to_cache = sorted({yr for (_, yr) in pitcher_cache})
+        print(f"\n  Refreshing FIP constants for seasons {seasons_to_cache}...")
+        for yr in seasons_to_cache:
+            update_fip_constant_from_api(yr, conn)
+
         # Fetch stats for all unique pitchers
         pitchers_to_fetch = [(pid, yr) for (pid, yr) in pitcher_cache if pitcher_cache[(pid, yr)] is None]
         print(f"\n  Fetching stats for {len(pitchers_to_fetch)} unique pitcher-seasons...")
@@ -134,7 +140,8 @@ def build_training_set(start_year=2022, end_year=2025):
             if stats is None:
                 continue
 
-            fip = compute_fip_from_stats(stats)
+            fip_constant = get_fip_constant_for_season(yr, conn)
+            fip = compute_fip_from_stats(stats, fip_constant=fip_constant)
 
             conn.execute("""
                 INSERT OR IGNORE INTO pitcher_stats

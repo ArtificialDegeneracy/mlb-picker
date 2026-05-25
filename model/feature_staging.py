@@ -315,50 +315,39 @@ def _starter_split(conn, mlb_pitcher_id, season, category, name, field):
     return row[0] if row and row[0] is not None else None
 
 
-# --- split category/name strings — PROBE-CONFIRM before relying on these ----
-# balldontlie's docs (truncated) confirm split_category/split_name exist and
-# show 'byArena'. The vs-hand and by-month strings below are the current best
-# guess; the probe prints the real values — reconcile then.
-SPLIT_CAT_HAND = "vsHand"        # provisional
-SPLIT_CAT_MONTH = "byMonth"      # provisional
-SPLIT_NAME_VS_RHP = "vs RHP"     # provisional
-SPLIT_NAME_VS_LHP = "vs LHP"     # provisional
-SPLIT_NAME_SEASON = "Season"     # provisional
+# --- split category/name strings — CONFIRMED from the live API 2026-05-21 ----
+# balldontlie /players/splits categories: byArena, byBreakdown, byDayMonth,
+# byOpponent, split. Key finding: there is NO vs-RHP/vs-LHP handedness split —
+# byBreakdown is Home/Away/Day/Night only. So a pitcher-platoon-split feature
+# CANNOT be built from this endpoint (see feat_starter_platoon_split_diff).
+SPLIT_CAT_RECENT = "byDayMonth"       # holds 'Last 7/15/30 Days', month names
+SPLIT_CAT_SEASON = "split"            # the season-total category
+SPLIT_NAME_RECENT = "Last 30 Days"    # recent-form window
+SPLIT_NAME_SEASON = "All Splits"      # season baseline row
 
 
 def feat_starter_platoon_split_diff(game, conn, season):
     """
-    Each starter's vs-RHP-minus-vs-LHP wOBA gap (how exploitable by platoon).
-    Feature = away starter's exploitability - home starter's. Positive => the
-    away starter is the more platoon-vulnerable of the two => home edge.
+    DISABLED — balldontlie's /players/splits has NO vs-RHP/vs-LHP handedness
+    split (confirmed live 2026-05-21: byBreakdown is Home/Away/Day/Night only).
+    A pitcher platoon-split feature cannot be built from this data source.
+    Returns neutral so it drops out of the model harmlessly. Kept registered
+    for audit visibility; remove from CANDIDATE_FEATURES if you want it gone.
     """
-    def gap(pid):
-        vr = _starter_split(conn, pid, season, SPLIT_CAT_HAND,
-                            SPLIT_NAME_VS_RHP, "woba")
-        vl = _starter_split(conn, pid, season, SPLIT_CAT_HAND,
-                            SPLIT_NAME_VS_LHP, "woba")
-        if vr is None or vl is None:
-            return None
-        return abs(vr - vl)
-    h, a = gap(game["home_starter_id"]), gap(game["away_starter_id"])
-    if h is None or a is None:
-        return NEUTRAL_DIFF
-    return a - h
+    return NEUTRAL_DIFF
 
 
 def feat_starter_recent_form_diff(game, conn, season):
     """
-    Recent-month ERA minus season ERA, per starter, then home-minus-away of
+    Recent-form ERA minus season ERA, per starter, then home-minus-away of
     that delta. A genuine pitcher recency signal — the model only has crude
     team-level offense_trend today. Tree-only: recency interacts with quality.
-    Uses the game's month label; falls back to neutral if the split is absent.
+    Uses balldontlie's 'Last 30 Days' split vs the season baseline.
     """
-    month_label = _month_label(game["game_date"])
-
     def form(pid):
-        recent = _starter_split(conn, pid, season, SPLIT_CAT_MONTH,
-                                month_label, "era")
-        season_era = _starter_split(conn, pid, season, SPLIT_CAT_HAND,
+        recent = _starter_split(conn, pid, season, SPLIT_CAT_RECENT,
+                                SPLIT_NAME_RECENT, "era")
+        season_era = _starter_split(conn, pid, season, SPLIT_CAT_SEASON,
                                     SPLIT_NAME_SEASON, "era")
         if recent is None or season_era is None:
             return None
@@ -368,16 +357,6 @@ def feat_starter_recent_form_diff(game, conn, season):
         return NEUTRAL_DIFF
     # home better-than-usual (more negative) should help home => away - home
     return a - h
-
-
-def _month_label(game_date):
-    """'2026-04-15' -> 'April'. balldontlie's byDayMonth labels are month names."""
-    months = ["January", "February", "March", "April", "May", "June", "July",
-              "August", "September", "October", "November", "December"]
-    try:
-        return months[int(game_date[5:7]) - 1]
-    except (ValueError, IndexError, TypeError):
-        return ""
 
 
 def feat_lineup_platoon_edge(game, conn, season):

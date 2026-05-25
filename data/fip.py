@@ -1,11 +1,12 @@
 """FIP (Fielding Independent Pitching) computation from raw pitching stats."""
 
 import logging
+from datetime import datetime
 
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from config import DEFAULT_FIP_CONSTANT
+from config import DEFAULT_FIP_CONSTANT, SEASON
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +62,9 @@ def compute_fip_from_stats(pitcher_stats, fip_constant=None):
     )
 
 
-def update_fip_constant_from_api(season=None):
-    """Fetch league-wide pitching totals and compute the FIP constant.
-
-    Pulls from MLB Stats API team pitching stats, sums across all teams,
-    and derives the constant. Updates the module-level cache.
+def update_fip_constant_from_api(season=None, conn=None):
+    """Fetch league-wide pitching totals, compute the season FIP constant,
+    and persist it in the `fip_constants` table.
 
     Returns the computed constant, or DEFAULT_FIP_CONSTANT on failure.
     """
@@ -80,15 +79,7 @@ def update_fip_constant_from_api(season=None):
     })
 
     if not data:
-        # Try previous season
-        data = _api_get("/teams/stats", params={
-            "stats": "season",
-            "season": season - 1,
-            "group": "pitching",
-            "sportIds": 1,
-        })
-
-    if not data:
+        logger.warning(f"FIP constant: no API data for {season}, falling back to DEFAULT_FIP_CONSTANT")
         return DEFAULT_FIP_CONSTANT
 
     # Sum league totals
@@ -110,13 +101,60 @@ def update_fip_constant_from_api(season=None):
         lg_hbp += s.get("hitByPitch", 0)
         lg_k += s.get("strikeOuts", 0)
 
-    if lg_ip > 0:
-        lg_era = lg_era / lg_ip  # Weighted ERA
-        constant = compute_league_fip_constant(lg_era, lg_hr, lg_bb, lg_hbp, lg_k, lg_ip)
-        logger.info(f"  Computed FIP constant for {season}: {constant}")
-        return constant
+    # Early season: not enough innings for a reliable constant. Use prior season.
+    if lg_ip < 4000:
+        logger.info(f"FIP constant: {season} only has {lg_ip:.0f} IP, using prior season constant")
+        return _resolve_constant(season - 1, conn) if conn else DEFAULT_FIP_CONSTANT
+
+    if lg_ip <= 0:
+        return DEFAULT_FIP_CONSTANT
+
+    lg_era_weighted = lg_era / lg_ip
+    constant = compute_league_fip_constant(lg_era_weighted, lg_hr, lg_bb, lg_hbp, lg_k, lg_ip)
+    logger.info(f"FIP constant for {season}: {constant} (lgERA={lg_era_weighted:.3f}, lgIP={lg_ip:.0f})")
+
+    if conn is not None:
+        conn.execute("""
+            INSERT INTO fip_constants (season, fip_constant, computed_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(season) DO UPDATE SET
+                fip_constant = excluded.fip_constant,
+                computed_at = excluded.computed_at
+        """, (season, constant, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+    return constant
+
+
+def get_fip_constant_for_season(season, conn):
+    """Read the cached FIP constant for `season`. Falls back through:
+      1. fip_constants table row for `season`
+      2. fip_constants table row for `season - 1` (early-season fallback)
+      3. DEFAULT_FIP_CONSTANT
+
+    Does NOT make API calls — pure read. To populate the cache, call
+    update_fip_constant_from_api() during the daily refresh.
+    """
+    row = conn.execute(
+        "SELECT fip_constant FROM fip_constants WHERE season = ?", (season,)
+    ).fetchone()
+    if row is not None:
+        return row[0]
+
+    row = conn.execute(
+        "SELECT fip_constant FROM fip_constants WHERE season = ?", (season - 1,)
+    ).fetchone()
+    if row is not None:
+        return row[0]
 
     return DEFAULT_FIP_CONSTANT
+
+
+def _resolve_constant(season, conn):
+    """Internal helper used by update_fip_constant_from_api during early-season fallback."""
+    row = conn.execute(
+        "SELECT fip_constant FROM fip_constants WHERE season = ?", (season,)
+    ).fetchone()
+    return row[0] if row else DEFAULT_FIP_CONSTANT
 
 
 def compute_league_fip_constant(league_era, league_hr, league_bb, league_hbp, league_k, league_ip):

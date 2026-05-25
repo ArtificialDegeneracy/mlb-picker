@@ -83,7 +83,9 @@ def main():
     print(f"Building training set: 2022-{args.season - 1} + {args.season}-to-date...")
 
     history_feats, history_labels, _ = build_training_features(2022, args.season - 1)
-    current_feats, current_labels, _ = build_training_features(args.season, args.season)
+    current_feats, current_labels, _, current_dates = build_training_features(
+        args.season, args.season, return_dates=True
+    )
 
     print(f"  History: {len(history_feats)} games")
     print(f"  Current season: {len(current_feats)} games")
@@ -93,12 +95,42 @@ def main():
         print(f"  Aborting. Try again once {args.season} has more data.")
         sys.exit(1)
 
-    # Holdout = last N% of current season (chronologically the most recent — that's the realistic test)
-    split = int(len(current_feats) * (1 - args.holdout_frac))
-    train_feats = history_feats + current_feats[:split]
-    train_labels = history_labels + current_labels[:split]
-    holdout_feats = current_feats[split:]
-    holdout_labels = current_labels[split:]
+    # Time-walked validation set: games AFTER the production model was trained.
+    # Earlier versions used the last 20% of current season as the holdout, but the
+    # production model was trained on data through its commit date — which included
+    # those games — so the regression gate was comparing candidate-on-holdout vs
+    # production-on-training-data and the gate fired (1-2pp lower) every time.
+    # mtime of the model file approximates its training cutoff.
+    prod_cutoff_date = None
+    used_time_walked = False
+    if os.path.exists(MODEL_PATH):
+        mtime = datetime.fromtimestamp(os.path.getmtime(MODEL_PATH))
+        prod_cutoff_date = mtime.strftime("%Y-%m-%d")
+        print(f"  Production model file mtime: {prod_cutoff_date} (used as time-walked cutoff)")
+
+    if prod_cutoff_date and any(d >= prod_cutoff_date for d in current_dates):
+        # Validation = games on or after production's cutoff. Both models can be
+        # fairly evaluated on these games because neither saw them in training.
+        val_idx = [i for i, d in enumerate(current_dates) if d >= prod_cutoff_date]
+        train_idx = [i for i, d in enumerate(current_dates) if d < prod_cutoff_date]
+        holdout_feats = [current_feats[i] for i in val_idx]
+        holdout_labels = [current_labels[i] for i in val_idx]
+        # Candidate trains on everything before cutoff (matches what production saw).
+        train_feats = history_feats + [current_feats[i] for i in train_idx]
+        train_labels = history_labels + [current_labels[i] for i in train_idx]
+        used_time_walked = True
+        print(f"  Time-walked holdout: {len(holdout_feats)} games on/after {prod_cutoff_date}")
+    else:
+        # No production model OR no new games since it was trained — fall back to
+        # the chronological tail split. The regression gate will be skipped below
+        # because the tail-split holdout would have leakage advantage for production.
+        split = int(len(current_feats) * (1 - args.holdout_frac))
+        train_feats = history_feats + current_feats[:split]
+        train_labels = history_labels + current_labels[:split]
+        holdout_feats = current_feats[split:]
+        holdout_labels = current_labels[split:]
+        reason = "no production model" if not prod_cutoff_date else "no games since production cutoff"
+        print(f"  Tail-split holdout: {len(holdout_feats)} games ({reason})")
 
     print(f"  Training: {len(train_feats)}, Holdout: {len(holdout_feats)}")
 
@@ -122,24 +154,35 @@ def main():
     print(f"  Brier:   {candidate_metrics['brier']:.4f}")
 
     # Compare against current production model on the same holdout.
-    # If feature schemas don't match (e.g., FEATURE_NAMES changed since the
-    # prod model was trained), skip the gate — the comparison isn't meaningful.
+    # Skip the gate if: (a) no production model exists, (b) feature schema changed,
+    # (c) holdout is too small for the comparison to be meaningful, or (d) we
+    # couldn't get a time-walked holdout (the tail split gives production a
+    # data-leakage advantage that would fire the gate spuriously — this is the
+    # bug that blocked 4 consecutive retrains 5/10-5/19/2026).
     baseline_metrics = None
     regression_blocked = False
     schema_mismatch = False
-    if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
+    if not used_time_walked:
+        print(f"\nSkipping regression gate: no time-walked holdout available "
+              f"(production would have data-leakage advantage on the tail split).")
+    elif len(holdout_feats) < 30:
+        print(f"\nSkipping regression gate: holdout too small ({len(holdout_feats)} games < 30).")
+    elif prod_cutoff_date is None:
+        # No production model exists; nothing to compare against.
+        pass
+    elif os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
         with open(MODEL_PATH, "rb") as f:
             prod_model = pickle.load(f)
         with open(SCALER_PATH, "rb") as f:
             prod_scaler = pickle.load(f)
         try:
             baseline_metrics = _evaluate(prod_model, prod_scaler, holdout_feats, holdout_labels)
-            print(f"\nProduction model on same holdout:")
+            print(f"\nProduction model on time-walked holdout ({len(holdout_feats)} games on/after {prod_cutoff_date}):")
             print(f"  Overall: {baseline_metrics['accuracy']:.1%}")
             delta = candidate_metrics["accuracy"] - baseline_metrics["accuracy"]
             print(f"  Delta:   {delta:+.1%}")
             if delta < -ACCURACY_REGRESSION_LIMIT:
-                print(f"\n  ⚠ REGRESSION GATE: candidate is {abs(delta):.1%} worse than production.")
+                print(f"\n  REGRESSION GATE: candidate is {abs(delta):.1%} worse than production.")
                 print(f"  Refusing to write new model files. Investigate before deploying.")
                 regression_blocked = True
         except ValueError as e:
@@ -194,6 +237,8 @@ def main():
         "season": args.season,
         "training_set_size": len(all_feats),
         "holdout_size": len(holdout_feats),
+        "holdout_strategy": "time_walked" if used_time_walked else "tail_split",
+        "prod_cutoff_date": prod_cutoff_date,
         "candidate_metrics": candidate_metrics,
         "production_metrics": baseline_metrics,
         "accuracy_delta": (

@@ -6,13 +6,17 @@ from datetime import datetime
 def get_current_season():
     """Derive the MLB season year from the current date.
 
-    MLB seasons run March–October. From November–February, we're in the
-    offseason and should reference the upcoming season.
+    MLB seasons run roughly late March through October. From January through
+    mid-February there's no current-season data, so default to the prior season
+    (whose data is complete and queryable). Late February onward, reference
+    the year that's starting / in progress.
     """
     now = datetime.now()
     if now.month >= 3:
         return now.year
-    return now.year  # Jan-Feb: still reference current year for spring training
+    if now.month == 2 and now.day >= 15:
+        return now.year  # Late Feb: spring training has started
+    return now.year - 1  # Jan or early Feb: prior season is the complete one
 
 
 SEASON = get_current_season()

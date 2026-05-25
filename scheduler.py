@@ -21,7 +21,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 from config import SEASON
 from db import init_db, seed_priors, get_db
 from data.mlb_api import get_schedule, get_pitcher_season_stats, get_all_team_records
-from data.fip import compute_fip_from_stats
 from data.fangraphs import refresh_fangraphs_stats
 from data.lineups import fetch_and_cache_lineup, LINEUP_WEAK_THRESHOLD, LINEUP_DAMPEN_FACTOR
 from model.predict import predict_games, print_predictions, load_model, _is_probable_opener
@@ -140,25 +139,23 @@ def run_lineup_lock(date_str=None):
                 if morning:
                     conn.execute("""
                         INSERT OR REPLACE INTO picks
-                        (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence, opener_flag)
-                        VALUES (?, ?, 'lineup_lock', ?, ?, ?, ?)
+                        (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence, opener_flag, pick_flipped)
+                        VALUES (?, ?, 'lineup_lock', ?, ?, ?, ?, ?)
                     """, (g["game_id"], date_str, morning["predicted_winner"],
                           morning["home_win_prob"], morning["confidence"],
-                          morning["opener_flag"] if "opener_flag" in morning.keys() else None))
+                          morning["opener_flag"] if "opener_flag" in morning.keys() else None,
+                          morning["pick_flipped"] if "pick_flipped" in morning.keys() else 0))
                     locked += 1
                 continue
 
-            # Build features with lineup-aware platoon data
+            # Build features
             feats = build_feature_vector(g, conn)
             if feats is None:
                 continue
 
-            # Override platoon_wrc_diff with actual weighted lineup OPS
             home_ld = lineup_data.get("home", {})
             away_ld = lineup_data.get("away", {})
             if home_ld.get("lineup_ops") and away_ld.get("lineup_ops"):
-                ops_diff = (home_ld["lineup_ops"] - away_ld["lineup_ops"]) * 150
-                feats["platoon_wrc_diff"] = ops_diff
                 logger.info(f"  {g['away_team']} @ {g['home_team']}: lineup OPS "
                            f"{away_ld['lineup_ops']:.3f} vs {home_ld['lineup_ops']:.3f}")
 
@@ -194,6 +191,22 @@ def run_lineup_lock(date_str=None):
                 logger.info(f"    Away-overconfidence damping: "
                             f"prob {pre_signal:.0%} → {home_win_prob:.0%}")
 
+            # Lineup-OPS nudge: shift home_win_prob toward the team with the stronger
+            # lineup-vs-handedness OPS. Conservative K=0.40 with ±4pp cap so a single
+            # bad OPS data point can't flip a HIGH pick. Stack position is after the
+            # signal-based dampening so it can move probability in either direction,
+            # before the weakened-lineup shrinkage which still gets the final say.
+            home_ops = home_ld.get("lineup_ops")
+            away_ops = away_ld.get("lineup_ops")
+            if home_ops and away_ops:
+                ops_gap = home_ops - away_ops
+                nudge = max(-0.04, min(0.04, ops_gap * 0.40))
+                if abs(nudge) >= 0.005:
+                    pre_nudge = home_win_prob
+                    home_win_prob = max(0.05, min(0.95, home_win_prob + nudge))
+                    logger.info(f"    Lineup-OPS nudge: gap={ops_gap:+.3f} "
+                                f"nudge={nudge:+.1%} → {pre_nudge:.0%} → {home_win_prob:.0%}")
+
             # Dampen for weakened lineups
             lineup_flags = []
             for side, ld, team in [("home", home_ld, g["home_team"]), ("away", away_ld, g["away_team"])]:
@@ -225,6 +238,19 @@ def run_lineup_lock(date_str=None):
             else:
                 confidence = "LEAN"
 
+            # LEAN-flip (see model/predict.py for rationale)
+            pick_flipped = 0
+            if confidence == "LEAN":
+                home_win_prob = 1 - home_win_prob
+                if home_win_prob >= 0.5:
+                    predicted_winner = g["home_team"]
+                    pick_prob = home_win_prob
+                else:
+                    predicted_winner = g["away_team"]
+                    pick_prob = 1 - home_win_prob
+                pick_flipped = 1
+                logger.info(f"    LEAN-flip: contrarian pick {predicted_winner} @ {pick_prob:.0%}")
+
             # Check if pick changed from morning
             morning = conn.execute(
                 "SELECT predicted_winner FROM picks WHERE game_id = ? AND run_type = 'morning'",
@@ -237,9 +263,9 @@ def run_lineup_lock(date_str=None):
 
             conn.execute("""
                 INSERT OR REPLACE INTO picks
-                (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence, opener_flag)
-                VALUES (?, ?, 'lineup_lock', ?, ?, ?, ?)
-            """, (g["game_id"], date_str, predicted_winner, round(home_win_prob, 4), confidence, opener_flag))
+                (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence, opener_flag, pick_flipped)
+                VALUES (?, ?, 'lineup_lock', ?, ?, ?, ?, ?)
+            """, (g["game_id"], date_str, predicted_winner, round(home_win_prob, 4), confidence, opener_flag, pick_flipped))
             locked += 1
 
     # Regenerate dashboard
