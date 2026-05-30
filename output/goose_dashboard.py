@@ -142,27 +142,105 @@ def fip_tier(fip):
 
 
 # Heuristic projected total. The win-probability model doesn't emit a runs
-# total, so we build one from the same inputs it cares about (FIP and recent
-# offense) plus the park factor. Calibrated against an MLB-typical 8.5 baseline.
-#   - Each FIP run above 4.00 nudges the projected total up by ~0.45 runs.
-#   - Each run/game of recent offense trend nudges by 0.6 (clamped ±1.5).
-#   - Park factor scales the run environment as a multiplicative tweak.
-# Output is rounded to 0.5 to match how Vegas posts totals.
-_TOTAL_BASE = 8.5
-_FIP_BASELINE = 4.00
-_FIP_PER_RUN = 0.45
+# total, so we build one from the inputs that most directly drive scoring:
+#   - Starter FIP — backward-looking run prevention (per starter)
+#   - Starter xwOBA — forward-looking contact quality, usage-weighted across
+#     pitch types (per starter). Complementary to FIP.
+#   - Bullpen ERA — relievers throw ~4 of 9 innings; missing this was the
+#     biggest gap in v1.
+#   - Recent offense trend — last 7 games runs scored vs season avg.
+#   - Park factor — multiplicative.
+# Baseline calibrated against the last 14 days of completed MLB games (n=188).
+_TOTAL_BASE = 8.5       # league-typical runs/game, tuned by backtest
+_FIP_BASELINE = 4.00    # league-average FIP
+_FIP_PER_RUN = 0.45     # ~half a run per FIP point above league avg (per starter)
+_XWOBA_BASELINE = 0.320 # league-average xwOBA against (allowed by pitchers)
+_XWOBA_PER_RUN = 8.0    # per-unit xwOBA delta -> runs (scaled per starter)
+_BULLPEN_BASELINE = 3.80
+_BULLPEN_PER_RUN = 0.35 # ~1/3 run/game per ERA point above league avg, per team
+_LEAGUE_AVG_BULLPEN = 3.80  # fallback when bullpen ERA missing or implausible
+
+
+def _starter_xwoba_against(conn, mlb_id, season):
+    """Usage-weighted xwOBA against, across the starter's pitch arsenal.
+
+    Returns None if there's no balldontlie mapping or no pitch-type rows.
+    Falls back through xwOBA -> wOBA -> SLG, mirroring starter_arsenal().
+    """
+    if mlb_id is None:
+        return None
+    b = conn.execute(
+        "SELECT bdl_id FROM bdl_id_map WHERE mlb_id=? AND entity_type='player'",
+        (mlb_id,)).fetchone()
+    if not b:
+        return None
+    rows = conn.execute(
+        "SELECT pitch_usage_percent, xwoba, woba, slg "
+        "FROM bdl_pitch_type_stats WHERE player_id=? AND role='pitcher' "
+        "AND season=?",
+        (b["bdl_id"], season)).fetchall()
+    total_usage = 0.0
+    weighted = 0.0
+    for r in rows:
+        u = r["pitch_usage_percent"] or 0
+        if u <= 0:
+            continue
+        q = r["xwoba"] if r["xwoba"] is not None else (
+            r["woba"] if r["woba"] is not None else r["slg"])
+        if q is None:
+            continue
+        weighted += q * u
+        total_usage += u
+    if total_usage <= 0:
+        return None
+    return weighted / total_usage
+
+
+def _team_bullpen_era(conn, team_abbr, season):
+    """Team bullpen ERA for the season. Implausible values (<= 1.0) treated
+    as missing — Bug 3 from CLAUDE.md left NYY/SF stuck at 0.0; rather than
+    let that poison the projection we fall back to league avg."""
+    row = conn.execute(
+        "SELECT bullpen_era FROM team_stats WHERE team_name=? AND season=? "
+        "AND bullpen_era IS NOT NULL",
+        (team_abbr, season)).fetchone()
+    if row and row["bullpen_era"] is not None and row["bullpen_era"] > 1.0:
+        return row["bullpen_era"]
+    return None
+
 
 def projected_total(conn, game_row, away_fip, home_fip):
     """Return Goose's projected runs total for the game, or None if missing input."""
     if away_fip is None or home_fip is None:
         return None
-    fip_component = ((away_fip - _FIP_BASELINE) + (home_fip - _FIP_BASELINE)) * _FIP_PER_RUN
     date = game_row["game_date"]
+    season = int(date[:4]) if date else get_current_season()
+
+    fip_component = ((away_fip - _FIP_BASELINE) + (home_fip - _FIP_BASELINE)) * _FIP_PER_RUN
+
+    away_xwoba = _starter_xwoba_against(conn, game_row["away_starter_id"], season)
+    home_xwoba = _starter_xwoba_against(conn, game_row["home_starter_id"], season)
+    xwoba_component = 0.0
+    if away_xwoba is not None:
+        xwoba_component += (away_xwoba - _XWOBA_BASELINE) * _XWOBA_PER_RUN
+    if home_xwoba is not None:
+        xwoba_component += (home_xwoba - _XWOBA_BASELINE) * _XWOBA_PER_RUN
+
+    home_bp = _team_bullpen_era(conn, game_row["home_team"], season) or _LEAGUE_AVG_BULLPEN
+    away_bp = _team_bullpen_era(conn, game_row["away_team"], season) or _LEAGUE_AVG_BULLPEN
+    bullpen_component = ((home_bp - _BULLPEN_BASELINE)
+                         + (away_bp - _BULLPEN_BASELINE)) * _BULLPEN_PER_RUN
+
     home_trend = _get_offense_trend(game_row["home_team"], date, conn) or 0.0
     away_trend = _get_offense_trend(game_row["away_team"], date, conn) or 0.0
     offense_component = max(-1.5, min(1.5, (home_trend + away_trend) * 0.6))
+
     park = PARK_FACTORS.get(game_row["home_team"], 1.00)
-    raw = (_TOTAL_BASE + fip_component + offense_component) * park
+    raw = (_TOTAL_BASE
+           + fip_component
+           + xwoba_component
+           + bullpen_component
+           + offense_component) * park
     return round(raw * 2) / 2  # nearest 0.5
 
 
