@@ -21,8 +21,9 @@ import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import get_current_season
+from config import get_current_season, PARK_FACTORS
 from db import get_db
+from model.features import _get_pitcher_fip, _get_offense_trend
 from output.goose_props import (gather_prop_board, gather_prop_edges_for_game,
                                 K_OVER_THRESHOLD, K_UNDER_THRESHOLD)
 
@@ -127,6 +128,120 @@ def starter_hand(conn, mlb_id):
                      "AND throw_hand IS NOT NULL ORDER BY season DESC LIMIT 1",
                      (mlb_id,)).fetchone()
     return r["throw_hand"] if r else None
+
+
+def fip_tier(fip):
+    """Color band for a starter's FIP. Mirrors the legacy dashboard's bands."""
+    if fip is None:
+        return "na"
+    if fip < 3.50:
+        return "good"
+    if fip < 4.20:
+        return "avg"
+    return "bad"
+
+
+# Heuristic projected total. The win-probability model doesn't emit a runs
+# total, so we build one from the inputs that most directly drive scoring:
+#   - Starter FIP — backward-looking run prevention (per starter)
+#   - Starter xwOBA — forward-looking contact quality, usage-weighted across
+#     pitch types (per starter). Complementary to FIP.
+#   - Bullpen ERA — relievers throw ~4 of 9 innings; missing this was the
+#     biggest gap in v1.
+#   - Recent offense trend — last 7 games runs scored vs season avg.
+#   - Park factor — multiplicative.
+# Baseline calibrated against the last 14 days of completed MLB games (n=188).
+_TOTAL_BASE = 8.5       # league-typical runs/game, tuned by backtest
+_FIP_BASELINE = 4.00    # league-average FIP
+_FIP_PER_RUN = 0.45     # ~half a run per FIP point above league avg (per starter)
+_XWOBA_BASELINE = 0.320 # league-average xwOBA against (allowed by pitchers)
+_XWOBA_PER_RUN = 8.0    # per-unit xwOBA delta -> runs (scaled per starter)
+_BULLPEN_BASELINE = 3.80
+_BULLPEN_PER_RUN = 0.35 # ~1/3 run/game per ERA point above league avg, per team
+_LEAGUE_AVG_BULLPEN = 3.80  # fallback when bullpen ERA missing or implausible
+
+
+def _starter_xwoba_against(conn, mlb_id, season):
+    """Usage-weighted xwOBA against, across the starter's pitch arsenal.
+
+    Returns None if there's no balldontlie mapping or no pitch-type rows.
+    Falls back through xwOBA -> wOBA -> SLG, mirroring starter_arsenal().
+    """
+    if mlb_id is None:
+        return None
+    b = conn.execute(
+        "SELECT bdl_id FROM bdl_id_map WHERE mlb_id=? AND entity_type='player'",
+        (mlb_id,)).fetchone()
+    if not b:
+        return None
+    rows = conn.execute(
+        "SELECT pitch_usage_percent, xwoba, woba, slg "
+        "FROM bdl_pitch_type_stats WHERE player_id=? AND role='pitcher' "
+        "AND season=?",
+        (b["bdl_id"], season)).fetchall()
+    total_usage = 0.0
+    weighted = 0.0
+    for r in rows:
+        u = r["pitch_usage_percent"] or 0
+        if u <= 0:
+            continue
+        q = r["xwoba"] if r["xwoba"] is not None else (
+            r["woba"] if r["woba"] is not None else r["slg"])
+        if q is None:
+            continue
+        weighted += q * u
+        total_usage += u
+    if total_usage <= 0:
+        return None
+    return weighted / total_usage
+
+
+def _team_bullpen_era(conn, team_abbr, season):
+    """Team bullpen ERA for the season. Implausible values (<= 1.0) treated
+    as missing — Bug 3 from CLAUDE.md left NYY/SF stuck at 0.0; rather than
+    let that poison the projection we fall back to league avg."""
+    row = conn.execute(
+        "SELECT bullpen_era FROM team_stats WHERE team_name=? AND season=? "
+        "AND bullpen_era IS NOT NULL",
+        (team_abbr, season)).fetchone()
+    if row and row["bullpen_era"] is not None and row["bullpen_era"] > 1.0:
+        return row["bullpen_era"]
+    return None
+
+
+def projected_total(conn, game_row, away_fip, home_fip):
+    """Return Goose's projected runs total for the game, or None if missing input."""
+    if away_fip is None or home_fip is None:
+        return None
+    date = game_row["game_date"]
+    season = int(date[:4]) if date else get_current_season()
+
+    fip_component = ((away_fip - _FIP_BASELINE) + (home_fip - _FIP_BASELINE)) * _FIP_PER_RUN
+
+    away_xwoba = _starter_xwoba_against(conn, game_row["away_starter_id"], season)
+    home_xwoba = _starter_xwoba_against(conn, game_row["home_starter_id"], season)
+    xwoba_component = 0.0
+    if away_xwoba is not None:
+        xwoba_component += (away_xwoba - _XWOBA_BASELINE) * _XWOBA_PER_RUN
+    if home_xwoba is not None:
+        xwoba_component += (home_xwoba - _XWOBA_BASELINE) * _XWOBA_PER_RUN
+
+    home_bp = _team_bullpen_era(conn, game_row["home_team"], season) or _LEAGUE_AVG_BULLPEN
+    away_bp = _team_bullpen_era(conn, game_row["away_team"], season) or _LEAGUE_AVG_BULLPEN
+    bullpen_component = ((home_bp - _BULLPEN_BASELINE)
+                         + (away_bp - _BULLPEN_BASELINE)) * _BULLPEN_PER_RUN
+
+    home_trend = _get_offense_trend(game_row["home_team"], date, conn) or 0.0
+    away_trend = _get_offense_trend(game_row["away_team"], date, conn) or 0.0
+    offense_component = max(-1.5, min(1.5, (home_trend + away_trend) * 0.6))
+
+    park = PARK_FACTORS.get(game_row["home_team"], 1.00)
+    raw = (_TOTAL_BASE
+           + fip_component
+           + xwoba_component
+           + bullpen_component
+           + offense_component) * park
+    return round(raw * 2) / 2  # nearest 0.5
 
 
 def hitter_vs_pitch(conn, bdl_id, pitch_type, season):
@@ -413,6 +528,15 @@ def assemble_games(date_str, season):
             home_bats = team_hitters(conn, home, g["away_starter_id"],
                                      away_ars, date_str, season)
 
+            # Same FIP the model consumes — blended current+prior season by IP
+            # (see model.features._get_pitcher_fip). Display only; the model
+            # already used these via fip_diff to produce the pick.
+            away_fip = _get_pitcher_fip(g["away_starter_id"], away, conn)
+            home_fip = _get_pitcher_fip(g["home_starter_id"], home, conn)
+            away_hand = starter_hand(conn, g["away_starter_id"])
+            home_hand = starter_hand(conn, g["home_starter_id"])
+            goose_total = projected_total(conn, g, away_fip, home_fip)
+
             # model & vegas as P(pick wins), to 0-100 ints
             model_pick_pct = round(pick_prob * 100)
             vegas_pick_pct = None
@@ -431,8 +555,13 @@ def assemble_games(date_str, season):
                 "confidence": tier, "confLabel": plabel, "pints": pints,
                 "modelPct": model_pick_pct, "vegasPct": vegas_pick_pct,
                 "total": v["total"] if v else None,
+                "gooseTotal": goose_total,
                 "pitcherAway": g["away_starter_name"],
                 "pitcherHome": g["home_starter_name"],
+                "fipAway": away_fip,
+                "fipHome": home_fip,
+                "handAway": away_hand,
+                "handHome": home_hand,
                 # private fields for edge derivation
                 "_form": {away: team_form(conn, away, date_str),
                           home: team_form(conn, home, date_str)},
@@ -770,6 +899,47 @@ def hitter_html(h):
     </li>"""
 
 
+def pitching_strip_html(g):
+    """Compact two-row pitcher matchup for the main card face.
+
+    Shows each starter's name, hand badge, team, and FIP (the same blended
+    value the model uses). An EDGE caret marks whichever side has the lower
+    FIP — FIP is the dominant pitching input into the pick.
+    """
+    away_fip, home_fip = g["fipAway"], g["fipHome"]
+
+    edge_side = None
+    if away_fip is not None and home_fip is not None and abs(away_fip - home_fip) >= 0.10:
+        edge_side = "away" if away_fip < home_fip else "home"
+
+    def row(name, abbr, hand, fip, side):
+        if not name:
+            return ""
+        hand_badge = (f'<span class="ps-hand ps-hand-{hand.lower()}">{hand}</span>'
+                      if hand else "")
+        tier = fip_tier(fip)
+        fip_txt = f"{fip:.2f}" if fip is not None else "—"
+        edge_marker = ('<span class="ps-edge" title="Better FIP">EDGE ◀</span>'
+                       if edge_side == side else "")
+        return (f'<div class="ps-row">'
+                f'<span class="ps-name">{name}</span>'
+                f'{hand_badge}'
+                f'<span class="ps-team">{abbr}</span>'
+                f'<span class="ps-spacer"></span>'
+                f'{edge_marker}'
+                f'<span class="ps-fip ps-fip-{tier}">'
+                f'<span class="ps-fip-val">{fip_txt}</span>'
+                f'<span class="ps-fip-lbl">FIP</span>'
+                f'</span>'
+                f'</div>')
+
+    away_row = row(g["pitcherAway"], g["away"], g["handAway"], away_fip, "away")
+    home_row = row(g["pitcherHome"], g["home"], g["handHome"], home_fip, "home")
+    if not away_row and not home_row:
+        return ""
+    return f'<div class="pitching-strip">{away_row}{home_row}</div>'
+
+
 def arsenal_html(name, abbr, arsenal):
     if not arsenal:
         body = '<div class="arsenal-empty">no arsenal data</div>'
@@ -1074,7 +1244,22 @@ def card_html(g, is_biggest=False):
     if g["total"] is not None:
         t = g["total"]
         tc = "hot" if t >= 9.0 else "cool" if t < 7.5 else ""
-        total_chip = f'<span class="ou-chip {tc}">O/U {t:.1f}</span>'
+        total_chip = f'<span class="ou-chip {tc}">Vegas O/U {t:.1f}</span>'
+
+    goose_total_chip = ""
+    gt = g.get("gooseTotal")
+    if gt is not None:
+        # Lean class: compared to Vegas, are we projecting over/under/match?
+        lean_cls = ""
+        if g["total"] is not None:
+            diff = gt - g["total"]
+            if diff >= 0.5:
+                lean_cls = "over"
+            elif diff <= -0.5:
+                lean_cls = "under"
+        goose_total_chip = f'<span class="goose-total {lean_cls}">Goose {gt:.1f}</span>'
+
+    pitching_strip = pitching_strip_html(g)
 
     biggest_badge = ('<span class="biggest-badge">★ Biggest edge</span>'
                      if is_biggest else "")
@@ -1104,6 +1289,7 @@ def card_html(g, is_biggest=False):
           {pint_row(g['pints'], 13)}
         </div>
       </div>
+      {pitching_strip}
       <div class="why-block">
         <div class="why-head">Goose's Gander</div>
         <ul class="edges-list">{edges or '<li class="edge-empty">A quiet one — no standout edge.</li>'}</ul>
@@ -1116,7 +1302,10 @@ def card_html(g, is_biggest=False):
         <span class="form-pill"><span class="form-team">{g['home']}</span>
           <span class="form-rec">{hf['L10']}</span>
           <span class="form-rd {'pos' if hf['RD'] >= 0 else 'neg'}">RD {hf['RD']:+d}</span></span>
+      </div>
+      <div class="totals-strip">
         {total_chip}
+        {goose_total_chip}
       </div>
       <button class="expand-btn" onclick="this.parentElement.classList.toggle('is-open')">
         <span class="expand-show">Breadcrumbs</span>
@@ -1539,11 +1728,11 @@ body {
 }
 .pred-pick-line { display: flex; align-items: baseline; gap: 10px; }
 .pred-pick-team {
-  font-family: var(--font-display); font-size: 42px; line-height: 0.95;
+  font-family: var(--font-display); font-size: 36px; line-height: 0.95;
   text-transform: uppercase; color: var(--foam); letter-spacing: .005em;
 }
 .pred-pick-odds {
-  font-family: var(--font-stats); font-weight: 700; font-size: 22px;
+  font-family: var(--font-stats); font-weight: 700; font-size: 20px;
   color: var(--brass); font-variant-numeric: tabular-nums; line-height: 1;
 }
 .pred-pick-conf {
@@ -1562,6 +1751,53 @@ body {
 .conf-med  { background: rgba(108,138,168,0.18); color: var(--steel-bright);   border-color: rgba(142,176,212,0.5); }
 .conf-lean { background: rgba(201,162,74,0.16);  color: var(--brass-bright);   border-color: rgba(201,162,74,0.5); }
 .conf-flip { background: rgba(217,205,168,0.10); color: var(--foam-dim);       border-color: rgba(217,205,168,0.3); }
+
+/* ============================================================
+   PITCHING STRIP — starters + FIP on the main card face
+   ============================================================ */
+.pitching-strip {
+  margin: 0 14px 10px;
+  padding: 8px 10px;
+  background: rgba(0,0,0,0.22);
+  border: 1px solid var(--line-dim);
+  border-radius: 3px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.ps-row {
+  display: flex; align-items: center; gap: 7px;
+  font-family: var(--font-body); font-size: 12px; line-height: 1.2;
+  color: var(--foam-dim);
+}
+.ps-name { color: var(--foam); font-weight: 600; }
+.ps-hand {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: 2px;
+  font-family: var(--font-headline); font-weight: 700; font-size: 9px;
+  letter-spacing: 0;
+}
+.ps-hand-l { background: rgba(142,176,212,0.22); color: var(--steel-bright); }
+.ps-hand-r { background: rgba(201,162,74,0.20);  color: var(--brass-bright); }
+.ps-team {
+  font-family: var(--font-headline); font-weight: 700; font-size: 9px;
+  letter-spacing: .18em; color: var(--fg3);
+}
+.ps-spacer { flex: 1; }
+.ps-edge {
+  font-family: var(--font-headline); font-weight: 700; font-size: 9px;
+  letter-spacing: .2em; color: var(--brass-bright);
+  text-transform: uppercase;
+}
+.ps-fip {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  font-family: var(--font-stats); font-variant-numeric: tabular-nums;
+  padding: 2px 7px; border-radius: 2px; border: 1px solid transparent;
+}
+.ps-fip-val { font-weight: 700; font-size: 13px; }
+.ps-fip-lbl { font-size: 9px; letter-spacing: .15em; opacity: .75; }
+.ps-fip-good { color: var(--shamrock-bright); background: rgba(31,107,58,0.18); border-color: rgba(58,154,92,0.35); }
+.ps-fip-avg  { color: var(--brass-bright);    background: rgba(201,162,74,0.14); border-color: rgba(201,162,74,0.35); }
+.ps-fip-bad  { color: var(--ember);           background: rgba(217,122,78,0.14); border-color: rgba(217,122,78,0.35); }
+.ps-fip-na   { color: var(--fg3); }
 
 /* ============================================================
    EDGE METER — model vs vegas
@@ -1827,6 +2063,13 @@ body {
 .form-strip {
   display: flex; gap: 8px; padding: 12px 14px 0;
 }
+.totals-strip {
+  display: flex; gap: 8px; padding: 8px 14px 0;
+}
+.totals-strip .ou-chip,
+.totals-strip .goose-total {
+  flex: 1; justify-content: center;
+}
 .form-pill {
   flex: 1;
   display: flex; align-items: baseline; gap: 6px; justify-content: center;
@@ -2064,6 +2307,19 @@ body {
 }
 .ou-chip.hot  { color: var(--ember); border-color: rgba(217,122,78,0.4); }
 .ou-chip.cool { color: var(--steel-bright); border-color: rgba(142,176,212,0.4); }
+
+/* Goose's projected total. Lean is computed vs Vegas (over/under/match). */
+.goose-total {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--font-stats); font-size: 10px; font-weight: 700;
+  color: var(--brass-bright);
+  border: 1px solid rgba(201,162,74,0.5);
+  background: rgba(201,162,74,0.10);
+  border-radius: 2px; padding: 5px 8px; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.goose-total.over  { color: var(--ember);         border-color: rgba(217,122,78,0.5);  background: rgba(217,122,78,0.10); }
+.goose-total.under { color: var(--steel-bright);  border-color: rgba(142,176,212,0.5); background: rgba(142,176,212,0.10); }
 
 /* empty states */
 .edge-empty, .hitter-empty {
