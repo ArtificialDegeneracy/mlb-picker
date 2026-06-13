@@ -235,22 +235,13 @@ def predict_games(date_str, run_type="morning"):
             else:
                 confidence = "LEAN"
 
-            # LEAN-flip: 471 historical LEAN picks at 45.9% accuracy (below coin flip).
-            # In the 0.48-0.52 home_win_prob band the model is genuinely anti-calibrated.
-            # Contest requires a pick every game, so flipping the LEAN pick is +3.5pp
-            # overall vs status quo. Audit trail preserved via pick_flipped column.
+            # LEAN-flip disabled 2026-06-13. The 5/20 backtest (471 LEAN picks at
+            # 45.9% raw, 54.1% if flipped) did not generalize: across 5/20-6/12
+            # flipping cost -2.6pp on 113 picks, and on the June-only subset the
+            # flip lost 12 wins out of 62 picks (raw 59.7% → flipped 40.3%).
+            # The original signal was likely overfit to early-2026 LEAN picks.
+            # Leaving `pick_flipped` column intact for audit; always writes 0.
             pick_flipped = 0
-            if confidence == "LEAN":
-                home_win_prob = 1 - home_win_prob
-                if home_win_prob >= 0.5:
-                    predicted_winner = game["home_team"]
-                    pick_prob = home_win_prob
-                else:
-                    predicted_winner = game["away_team"]
-                    pick_prob = 1 - home_win_prob
-                pick_flipped = 1
-                logger.info(f"  LEAN-flip: {game['away_team']} @ {game['home_team']} — "
-                            f"contrarian pick {predicted_winner} @ {pick_prob:.0%}")
 
             pick = {
                 "game_id": game["game_id"],

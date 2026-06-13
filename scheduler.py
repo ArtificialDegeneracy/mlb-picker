@@ -238,18 +238,8 @@ def run_lineup_lock(date_str=None):
             else:
                 confidence = "LEAN"
 
-            # LEAN-flip (see model/predict.py for rationale)
+            # LEAN-flip disabled 2026-06-13 — see model/predict.py for rationale.
             pick_flipped = 0
-            if confidence == "LEAN":
-                home_win_prob = 1 - home_win_prob
-                if home_win_prob >= 0.5:
-                    predicted_winner = g["home_team"]
-                    pick_prob = home_win_prob
-                else:
-                    predicted_winner = g["away_team"]
-                    pick_prob = 1 - home_win_prob
-                pick_flipped = 1
-                logger.info(f"    LEAN-flip: contrarian pick {predicted_winner} @ {pick_prob:.0%}")
 
             # Check if pick changed from morning
             morning = conn.execute(
