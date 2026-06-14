@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-06-14T11:48:17.422766",
+  "action": "deployed",
+  "season": 2026,
+  "training_set_size": 10428,
+  "holdout_size": 143,
+  "holdout_strategy": "tail_split",
+  "prod_cutoff_date": "2026-06-14",
+  "candidate_metrics": {
+    "accuracy": 0.6013986013986014,
+    "high_acc": 0.6666666666666666,
+    "high_n": 9,
+    "med_acc": 0.6666666666666666,
+    "med_n": 72,
+    "lean_acc": 0.5161290322580645,
+    "lean_n": 62,
+    "brier": 0.23380711826385356
+  },
+  "production_metrics": null,
+  "accuracy_delta": null,
+  "coefficients": {
+    "fip_diff": -0.11687299607782664,
+    "team_quality_diff": 0.4307529631087186,
+    "park_factor": 0.04347516158764546,
+    "home_offense_trend": 0.023987031248796302,
+    "away_offense_trend": -0.004172429937178969
+  },
+  "regression_gate_limit": 0.02,
+  "regression_blocked": false
+}
