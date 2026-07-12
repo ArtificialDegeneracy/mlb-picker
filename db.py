@@ -247,6 +247,9 @@ CREATE TABLE IF NOT EXISTS bdl_season_stats (
 -- dashboard scopes its reads by game_date, otherwise day-2 reads serve stale
 -- day-1 rows. The PK includes game_date so re-ingest on the same day is
 -- idempotent (INSERT OR REPLACE) but different days coexist.
+-- Rows hold the last PRE-GAME odds snapshot: the ingest skips the upsert once
+-- a game's scheduled start has passed (in-play/settled lines would otherwise
+-- overwrite the pre-game line on later cron runs). updated_at = snapshot time.
 CREATE TABLE IF NOT EXISTS bdl_odds_today (
     bdl_game_id INTEGER,
     game_date TEXT,            -- 'YYYY-MM-DD' — the slate this row belongs to

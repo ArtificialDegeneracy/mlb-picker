@@ -20,7 +20,7 @@ import os
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -226,7 +226,9 @@ def ingest_for_date(conn, date_str: str) -> Dict[str, int]:
 
     Safe to re-run mid-day (lineup-lock cron) — INSERT OR REPLACE keys on
     `game_date` so the rows for *this* date get refreshed, leaving other
-    dates' snapshots intact.
+    dates' snapshots intact. Odds rows for games that already started are
+    NOT refreshed (the last pre-game snapshot is kept — see
+    _ingest_games_and_odds).
 
     Returns counts per table (for log readability).
     """
@@ -271,6 +273,14 @@ def _ingest_games_and_odds(session, conn, date_str, counts) -> List[dict]:
     D (catches matinee games) AND D+1 (catches the night games), then filter
     in Python by ET date.
 
+    Odds are only upserted for games that have not started yet: the odds
+    endpoint keeps updating through and after the game (in-play / settled
+    lines), and the lineup-lock crons run as late as 8pm ET, so re-ingesting
+    a day game's odds would overwrite the pre-game line with a settled one
+    (the 2026-07-12 audit found stored day-game favorites at 85.5% mean
+    implied probability). Skipping post-start rows keeps the last PRE-GAME
+    snapshot; `updated_at` records when it was taken.
+
     Returns the filtered games list so downstream steps can build the player
     set.
     """
@@ -280,6 +290,7 @@ def _ingest_games_and_odds(session, conn, date_str, counts) -> List[dict]:
                          {"dates[]": [date_str, next_utc]}))
 
     games = []
+    start_utc = {}  # bdl_game_id -> scheduled first pitch (UTC)
     for g in raw:
         # balldontlie returns date as ISO with Z; convert to ET and compare.
         try:
@@ -289,6 +300,7 @@ def _ingest_games_and_odds(session, conn, date_str, counts) -> List[dict]:
             continue
         if et_date == target:
             games.append(g)
+            start_utc[g["id"]] = utc
     counts["games"] = len(games)
     if not games:
         return []
@@ -296,10 +308,14 @@ def _ingest_games_and_odds(session, conn, date_str, counts) -> List[dict]:
     game_ids = [g["id"] for g in games]
     odds = list(_paginate(session, "odds", {"game_ids[]": game_ids}))
 
+    now = datetime.now(timezone.utc)
     by_game = {g["id"]: g for g in games}
     for o in odds:
         g = by_game.get(o["game_id"])
         if not g:
+            continue
+        if now >= start_utc[o["game_id"]]:
+            counts["odds_skipped_started"] += 1
             continue
         home_abbr = ABBR_REMAP.get(g["home_team"]["abbreviation"], g["home_team"]["abbreviation"])
         away_abbr = ABBR_REMAP.get(g["away_team"]["abbreviation"], g["away_team"]["abbreviation"])
@@ -323,6 +339,10 @@ def _ingest_games_and_odds(session, conn, date_str, counts) -> List[dict]:
              _coerce_float(o.get("spread_home_value")),
              o.get("spread_home_odds")))
         counts["odds"] += 1
+    if counts.get("odds_skipped_started"):
+        logger.info("odds: skipped %d rows for already-started games — "
+                    "keeping last pre-game snapshot",
+                    counts["odds_skipped_started"])
     return games
 
 
