@@ -200,22 +200,41 @@ def get_bullpen_era(season=None):
     return results
 
 
+def _ensure_refresh_log(db_conn):
+    db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS fangraphs_refresh_log (
+            season INTEGER PRIMARY KEY,
+            refreshed_at TEXT NOT NULL
+        )
+    """)
+
+
 def refresh_fangraphs_stats(db_conn, season=None, force=False):
     """Pull wRC+ and bullpen ERA from FanGraphs and update team_stats table.
 
-    Skips refresh if data was updated within the last 7 days (unless force=True).
+    Skips refresh if FanGraphs was already pulled within the last 12 hours
+    (unless force=True) — enough to dedupe same-day re-runs while letting the
+    daily morning cron refresh every day.
+
+    Freshness MUST be tracked in fangraphs_refresh_log, never via
+    team_stats.updated_at: the team-records write in refresh_data bumps
+    updated_at for every team right before this runs, so an updated_at-based
+    check reads "fresh" forever and this function never executes. That is how
+    wrc_plus_vs_lhp/vs_rhp sat NULL for all 30 teams for 2 months in 2026 and
+    stuck bullpen_era rows never self-repaired.
     """
     season = season or SEASON
+    _ensure_refresh_log(db_conn)
 
     if not force:
         row = db_conn.execute(
-            "SELECT MAX(updated_at) FROM team_stats WHERE season = ? AND wrc_plus IS NOT NULL", (season,)
+            "SELECT refreshed_at FROM fangraphs_refresh_log WHERE season = ?", (season,)
         ).fetchone()
         if row and row[0]:
             try:
                 last_update = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
-                if datetime.now() - last_update < timedelta(days=7):
-                    logger.info("FanGraphs data is fresh (< 7 days), skipping refresh")
+                if datetime.now() - last_update < timedelta(hours=12):
+                    logger.info("FanGraphs data is fresh (< 12 hours), skipping refresh")
                     return
             except ValueError:
                 pass  # Proceed with refresh if timestamp is unparseable
@@ -262,6 +281,11 @@ def refresh_fangraphs_stats(db_conn, season=None, force=False):
                 updated_at = datetime('now')
         """, (team_id, abbr, season, wrc.get(abbr), wrc_vs_lhp.get(abbr), wrc_vs_rhp.get(abbr), bullpen.get(abbr)))
         updated += 1
+
+    db_conn.execute("""
+        INSERT INTO fangraphs_refresh_log (season, refreshed_at) VALUES (?, ?)
+        ON CONFLICT(season) DO UPDATE SET refreshed_at = excluded.refreshed_at
+    """, (season, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
     logger.info(f"Updated FanGraphs stats for {updated} teams")
     print(f"  FanGraphs: updated {updated} teams (wRC+: {len(wrc)}, bullpen ERA: {len(bullpen)}, platoon splits: {len(wrc_vs_lhp)}L/{len(wrc_vs_rhp)}R)")
