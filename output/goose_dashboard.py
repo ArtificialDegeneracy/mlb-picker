@@ -141,17 +141,18 @@ def fip_tier(fip):
     return "bad"
 
 
-# Heuristic projected total. The win-probability model doesn't emit a runs
-# total, so we build one from the inputs that most directly drive scoring:
-#   - Starter FIP — backward-looking run prevention (per starter)
-#   - Starter xwOBA — forward-looking contact quality, usage-weighted across
-#     pitch types (per starter). Complementary to FIP.
-#   - Bullpen ERA — relievers throw ~4 of 9 innings; missing this was the
-#     biggest gap in v1.
-#   - Recent offense trend — last 7 games runs scored vs season avg.
-#   - Park factor — multiplicative.
-# Baseline calibrated against the last 14 days of completed MLB games (n=188).
-_TOTAL_BASE = 8.5       # league-typical runs/game, tuned by backtest
+# Projected total, display only. The 2026-07-12 backtest (260 night games
+# 6/13-7/11 with clean pre-game odds; day games excluded for the
+# bdl_odds_today mid-game-overwrite bug) showed the standalone heuristic had
+# no edge: MAE 3.75 vs actual, worse than the Vegas total (3.66) and even a
+# constant (3.65). Regressing (actual - vegas_total) on the FIP/xwOBA/
+# bullpen/offense components found no signal in any of them (R^2 = 0.007,
+# all |t| < 1.1). So the projection is now ANCHORED to the Vegas consensus
+# total and only expresses a small clipped lean (<= half a run) from those
+# components — calibrated by construction, never pretending to beat the
+# line. When no Vegas total is posted yet, it falls back to a park-adjusted
+# league base plus the same clipped lean.
+_TOTAL_BASE = 9.0       # no-Vegas fallback anchor; fitted on 2026 night games
 _FIP_BASELINE = 4.00    # league-average FIP
 _FIP_PER_RUN = 0.45     # ~half a run per FIP point above league avg (per starter)
 _XWOBA_BASELINE = 0.320 # league-average xwOBA against (allowed by pitchers)
@@ -159,6 +160,12 @@ _XWOBA_PER_RUN = 8.0    # per-unit xwOBA delta -> runs (scaled per starter)
 _BULLPEN_BASELINE = 3.80
 _BULLPEN_PER_RUN = 0.35 # ~1/3 run/game per ERA point above league avg, per team
 _LEAGUE_AVG_BULLPEN = 3.80  # fallback when bullpen ERA missing or implausible
+_LEAN_SCALE = 0.30      # raw component lean -> runs of adjustment
+_LEAN_CAP = 0.5         # adjustment never moves more than half a run off anchor
+# Real MLB totals live ~6.5-13. Anything outside this is almost certainly the
+# bdl_odds_today day-game contamination bug (in-game/settled odds overwrite
+# the pre-game line) — don't anchor to it.
+_ANCHOR_MIN, _ANCHOR_MAX = 6.0, 14.0
 
 
 def _starter_xwoba_against(conn, mlb_id, season):
@@ -209,38 +216,54 @@ def _team_bullpen_era(conn, team_abbr, season):
     return None
 
 
-def projected_total(conn, game_row, away_fip, home_fip):
-    """Return Goose's projected runs total for the game, or None if missing input."""
-    if away_fip is None or home_fip is None:
-        return None
+def _component_lean(conn, game_row, away_fip, home_fip):
+    """Raw runs lean from starter FIP, starter xwOBA-against, bullpen ERA and
+    recent offense. Missing inputs contribute 0. Same component weights as the
+    old standalone heuristic — the 7/12 backtest found no per-component signal
+    to refit, so they only set the relative shape of a small lean."""
     date = game_row["game_date"]
     season = int(date[:4]) if date else get_current_season()
 
-    fip_component = ((away_fip - _FIP_BASELINE) + (home_fip - _FIP_BASELINE)) * _FIP_PER_RUN
+    lean = 0.0
+    if away_fip is not None:
+        lean += (away_fip - _FIP_BASELINE) * _FIP_PER_RUN
+    if home_fip is not None:
+        lean += (home_fip - _FIP_BASELINE) * _FIP_PER_RUN
 
     away_xwoba = _starter_xwoba_against(conn, game_row["away_starter_id"], season)
     home_xwoba = _starter_xwoba_against(conn, game_row["home_starter_id"], season)
-    xwoba_component = 0.0
     if away_xwoba is not None:
-        xwoba_component += (away_xwoba - _XWOBA_BASELINE) * _XWOBA_PER_RUN
+        lean += (away_xwoba - _XWOBA_BASELINE) * _XWOBA_PER_RUN
     if home_xwoba is not None:
-        xwoba_component += (home_xwoba - _XWOBA_BASELINE) * _XWOBA_PER_RUN
+        lean += (home_xwoba - _XWOBA_BASELINE) * _XWOBA_PER_RUN
 
     home_bp = _team_bullpen_era(conn, game_row["home_team"], season) or _LEAGUE_AVG_BULLPEN
     away_bp = _team_bullpen_era(conn, game_row["away_team"], season) or _LEAGUE_AVG_BULLPEN
-    bullpen_component = ((home_bp - _BULLPEN_BASELINE)
-                         + (away_bp - _BULLPEN_BASELINE)) * _BULLPEN_PER_RUN
+    lean += ((home_bp - _BULLPEN_BASELINE)
+             + (away_bp - _BULLPEN_BASELINE)) * _BULLPEN_PER_RUN
 
     home_trend = _get_offense_trend(game_row["home_team"], date, conn) or 0.0
     away_trend = _get_offense_trend(game_row["away_team"], date, conn) or 0.0
-    offense_component = max(-1.5, min(1.5, (home_trend + away_trend) * 0.6))
+    lean += max(-1.5, min(1.5, (home_trend + away_trend) * 0.6))
+    return lean
 
-    park = PARK_FACTORS.get(game_row["home_team"], 1.00)
-    raw = (_TOTAL_BASE
-           + fip_component
-           + xwoba_component
-           + bullpen_component
-           + offense_component) * park
+
+def projected_total(conn, game_row, away_fip, home_fip, vegas_total=None):
+    """Return Goose's projected runs total for the game, or None if missing input.
+
+    Vegas-anchored: consensus total plus a clipped component lean of at most
+    +/- _LEAN_CAP runs. Without a posted total, park-adjusted _TOTAL_BASE plus
+    the same lean (requires both starter FIPs so the fallback isn't blind).
+    """
+    lean_adj = max(-_LEAN_CAP, min(_LEAN_CAP,
+                   _component_lean(conn, game_row, away_fip, home_fip) * _LEAN_SCALE))
+    if vegas_total is not None and _ANCHOR_MIN <= vegas_total <= _ANCHOR_MAX:
+        raw = vegas_total + lean_adj
+    elif away_fip is not None and home_fip is not None:
+        park = PARK_FACTORS.get(game_row["home_team"], 1.00)
+        raw = _TOTAL_BASE * park + lean_adj
+    else:
+        return None
     return round(raw * 2) / 2  # nearest 0.5
 
 
@@ -535,7 +558,8 @@ def assemble_games(date_str, season):
             home_fip = _get_pitcher_fip(g["home_starter_id"], home, conn)
             away_hand = starter_hand(conn, g["away_starter_id"])
             home_hand = starter_hand(conn, g["home_starter_id"])
-            goose_total = projected_total(conn, g, away_fip, home_fip)
+            goose_total = projected_total(conn, g, away_fip, home_fip,
+                                          vegas_total=v["total"] if v else None)
 
             # model & vegas as P(pick wins), to 0-100 ints
             model_pick_pct = round(pick_prob * 100)
