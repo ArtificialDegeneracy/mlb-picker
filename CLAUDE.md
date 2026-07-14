@@ -71,6 +71,7 @@ Dashboard: https://artificialdegeneracy.github.io/mlb-picker/
 - **Pitcher stats fallback**: Current season → previous season. Stores both rows keyed by actual season.
 - **Early-season guard**: Team W-L records need 10+ games before blending with priors.
 - **Artifacts**: DB + model pkl files persist between GitHub Actions runs via upload/download artifacts. Seed files in `seed/` as fallback.
+- **Model deploys**: use the `force_seed_model=true` workflow_dispatch input — restores the DB from the artifact as normal but uses the repo checkout's `model/trained_model.pkl` + `scaler.pkl` (the path retrain PRs commit to), so DB history is never touched. Flow: merge the retrain PR, dispatch daily-picks with `force_seed_model=true`. Rollback: revert on main, re-dispatch. `force_seed=true` resets BOTH DB and model to `seed/` and is now guarded: the run fails if the artifact DB has more picks than the seed DB (the 6/13 wipe scenario) unless `allow_history_loss=true` is also set.
 
 ## Known Issues (as of 2026-05-20)
 - Game time UTC→ET uses month approximation for DST (wrong March 1-13, late Oct)

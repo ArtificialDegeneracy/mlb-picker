@@ -25,7 +25,23 @@ on:
         required: false
         default: ''
       force_seed:
-        description: 'Skip artifact restore and use seed/ DB+model (deploy mechanism)'
+        description: 'DANGER: reset cloud DB+model to seed/ (erases artifact DB history; guarded — see allow_history_loss). For model deploys use force_seed_model instead.'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      force_seed_model:
+        description: 'Deploy model only: restore DB from artifact as normal, but use the repo checkout''s model/trained_model.pkl + scaler.pkl (what retrain PRs commit). Never touches DB history.'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      allow_history_loss:
+        description: 'Override the force_seed guard when the artifact DB has more picks than the seed DB (i.e. you really do intend to discard history)'
         required: false
         default: 'false'
         type: choice
@@ -52,6 +68,46 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Guard against history-erasing force_seed
+        if: inputs.force_seed == 'true'
+        run: |
+          # The 6/13/2026 force_seed deploy reset the cloud DB to a May-24 seed
+          # and silently erased 464 picks + 248 Final games. This guard refuses
+          # force_seed whenever the artifact DB holds more picks than the seed
+          # DB — i.e. whenever the reset would lose history. Refresh
+          # seed/mlb_picker.db from the latest artifact first, or set
+          # allow_history_loss=true if discarding history is truly intended.
+          count_picks() {
+            python3 - "$1" <<'EOF'
+          import sqlite3, sys
+          try:
+              conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+              print(conn.execute("SELECT COUNT(*) FROM picks").fetchone()[0])
+          except Exception:
+              print(0)
+          EOF
+          }
+
+          if ! gh run download --name mlb-picker-db --dir /tmp/db-guard 2>/dev/null; then
+            echo "No artifact DB exists — nothing to lose, force_seed is safe"
+            exit 0
+          fi
+
+          ARTIFACT_PICKS=$(count_picks /tmp/db-guard/mlb_picker.db)
+          SEED_PICKS=$(count_picks seed/mlb_picker.db)
+          echo "Artifact DB picks: $ARTIFACT_PICKS | Seed DB picks: $SEED_PICKS"
+
+          if [ "$ARTIFACT_PICKS" -gt "$SEED_PICKS" ]; then
+            if [ "${{ inputs.allow_history_loss }}" = "true" ]; then
+              echo "::warning::force_seed will discard $((ARTIFACT_PICKS - SEED_PICKS)) picks present in the artifact DB but not the seed DB (allow_history_loss=true)"
+            else
+              echo "::error::REFUSING force_seed: artifact DB has $ARTIFACT_PICKS picks but seed DB has only $SEED_PICKS — this reset would erase history (this is exactly how the 5/25-6/12 picks were lost on 6/13). Either refresh seed/mlb_picker.db from the latest artifact first, use force_seed_model=true for a model-only deploy, or re-run with allow_history_loss=true."
+              exit 1
+            fi
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Restore database and model
         run: |
           if [ "${{ inputs.force_seed }}" = "true" ]; then
@@ -63,7 +119,20 @@ jobs:
               cp /tmp/db-restore/mlb_picker.db . 2>/dev/null && \
               echo "DB restored" || echo "No previous DB found"
 
-            if gh run download --name mlb-picker-model --dir /tmp/model-restore 2>/dev/null; then
+            if [ "${{ inputs.force_seed_model }}" = "true" ]; then
+              # Model-only deploy: keep the artifact DB (restored above) and
+              # skip the model artifact restore, so the pkls from the repo
+              # checkout (model/trained_model.pkl + scaler.pkl — the path
+              # retrain PRs commit to) become the new production model. The
+              # updated model is saved back to the artifact at the end of this
+              # run. DB history is never touched. Rollback = revert the model
+              # commit on main and re-dispatch with force_seed_model=true.
+              if [ ! -f model/trained_model.pkl ] || [ ! -f model/scaler.pkl ]; then
+                echo "::error::force_seed_model=true but model/trained_model.pkl or model/scaler.pkl is missing from the repo checkout"
+                exit 1
+              fi
+              echo "Model deploying from repo checkout (model/); DB untouched"
+            elif gh run download --name mlb-picker-model --dir /tmp/model-restore 2>/dev/null; then
               echo "Model artifact downloaded. Contents:"
               find /tmp/model-restore -type f
               find /tmp/model-restore -name "trained_model.pkl" -exec cp {} model/ \;
