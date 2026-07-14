@@ -139,6 +139,15 @@ CREATE TABLE IF NOT EXISTS fip_constants (
     computed_at TEXT
 );
 
+-- Tracks when FanGraphs stats were last actually pulled, per season.
+-- team_stats.updated_at cannot serve this purpose: the daily team-records
+-- write bumps it for every row, which made the FanGraphs freshness check
+-- skip forever (platoon splits NULL all-2026 bug).
+CREATE TABLE IF NOT EXISTS fangraphs_refresh_log (
+    season INTEGER PRIMARY KEY,
+    refreshed_at TEXT NOT NULL
+);
+
 -- balldontlie API cache tables (Path B feature expansion).
 -- These store advanced data balldontlie provides that the MLB Stats API /
 -- FanGraphs sources don't. They are SEPARATE from the core pipeline tables:

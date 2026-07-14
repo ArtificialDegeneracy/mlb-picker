@@ -36,6 +36,12 @@ TABLE_MIGRATIONS_EXTRA = [
             computed_at TEXT
         )
     """),
+    ("fangraphs_refresh_log", """
+        CREATE TABLE IF NOT EXISTS fangraphs_refresh_log (
+            season INTEGER PRIMARY KEY,
+            refreshed_at TEXT NOT NULL
+        )
+    """),
     # balldontlie API cache tables (Path B feature expansion). Empty until a
     # balldontlie ingest populates them; model/feature_staging.py reads them.
     # Must mirror the definitions in db.py:SCHEMA exactly.
