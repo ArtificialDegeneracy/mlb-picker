@@ -9,6 +9,7 @@ DB_PATH = sys.argv[1] if len(sys.argv) > 1 else "mlb_picker.db"
 COLUMN_MIGRATIONS = [
     ("picks", "opener_flag", "TEXT"),
     ("picks", "pick_flipped", "INTEGER DEFAULT 0"),
+    ("picks", "raw_model_prob", "REAL"),
     ("pitcher_stats", "throw_hand", "TEXT"),
     ("team_stats", "wrc_plus_vs_lhp", "REAL"),
     ("team_stats", "wrc_plus_vs_rhp", "REAL"),

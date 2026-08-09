@@ -26,7 +26,7 @@ from data.lineups import fetch_and_cache_lineup, LINEUP_WEAK_THRESHOLD, LINEUP_D
 from model.predict import predict_games, print_predictions, load_model, _is_probable_opener
 from model.features import (
     build_feature_vector, FEATURE_NAMES,
-    compute_signals, away_overconfidence_damping,
+    compute_signals, away_overconfidence_damping, resolve_feature_names,
 )
 from output.dashboard import generate_dashboard
 
@@ -139,12 +139,14 @@ def run_lineup_lock(date_str=None):
                 if morning:
                     conn.execute("""
                         INSERT OR REPLACE INTO picks
-                        (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence, opener_flag, pick_flipped)
-                        VALUES (?, ?, 'lineup_lock', ?, ?, ?, ?, ?)
+                        (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence,
+                         opener_flag, pick_flipped, raw_model_prob)
+                        VALUES (?, ?, 'lineup_lock', ?, ?, ?, ?, ?, ?)
                     """, (g["game_id"], date_str, morning["predicted_winner"],
                           morning["home_win_prob"], morning["confidence"],
                           morning["opener_flag"] if "opener_flag" in morning.keys() else None,
-                          morning["pick_flipped"] if "pick_flipped" in morning.keys() else 0))
+                          morning["pick_flipped"] if "pick_flipped" in morning.keys() else 0,
+                          morning["raw_model_prob"] if "raw_model_prob" in morning.keys() else None))
                     locked += 1
                 continue
 
@@ -160,9 +162,11 @@ def run_lineup_lock(date_str=None):
                            f"{away_ld['lineup_ops']:.3f} vs {home_ld['lineup_ops']:.3f}")
 
             # Predict
-            feat_df = pd.DataFrame([feats])[FEATURE_NAMES].fillna(0)
+            feat_df = pd.DataFrame([feats])[resolve_feature_names(model)].fillna(0)
             feat_scaled = scaler.transform(feat_df)
             home_win_prob = model.predict_proba(feat_scaled)[0][1]
+            # Snapshot the model's own output before the calibration stack touches it.
+            raw_model_prob = home_win_prob
 
             # Re-detect openers at lineup_lock time and dampen the raw model probability
             # toward 50%. Mirrors model.predict.predict_games() so morning and lineup_lock
@@ -253,9 +257,11 @@ def run_lineup_lock(date_str=None):
 
             conn.execute("""
                 INSERT OR REPLACE INTO picks
-                (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence, opener_flag, pick_flipped)
-                VALUES (?, ?, 'lineup_lock', ?, ?, ?, ?, ?)
-            """, (g["game_id"], date_str, predicted_winner, round(home_win_prob, 4), confidence, opener_flag, pick_flipped))
+                (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence,
+                 opener_flag, pick_flipped, raw_model_prob)
+                VALUES (?, ?, 'lineup_lock', ?, ?, ?, ?, ?, ?)
+            """, (g["game_id"], date_str, predicted_winner, round(home_win_prob, 4), confidence,
+                  opener_flag, pick_flipped, round(raw_model_prob, 4)))
             locked += 1
 
     # Regenerate dashboard

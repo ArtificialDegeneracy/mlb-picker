@@ -104,6 +104,12 @@ CREATE TABLE IF NOT EXISTS picks (
     correct INTEGER,
     opener_flag TEXT,
     pick_flipped INTEGER DEFAULT 0,
+    -- Raw logistic-regression output BEFORE the post-model calibration stack
+    -- (opener dampening, away-overconfidence damping, lineup nudge, weakened-lineup
+    -- shrinkage). home_win_prob stores the POST-stack value. Keeping both lets us
+    -- attribute errors to the model vs the stack without a lookahead-biased
+    -- recomputation — see the 63-67% band anomaly, 2026-08-09.
+    raw_model_prob REAL,
     PRIMARY KEY (game_id, run_type)
 );
 

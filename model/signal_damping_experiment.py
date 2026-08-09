@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db import get_db
 from model.features import (
     FEATURE_NAMES,
+    resolve_feature_names,
     _get_pitcher_fip,
     _get_team_quality,
     _get_park_factor,
@@ -151,8 +152,9 @@ def main():
             feats = _build_feature_vector_for_backtest(g, conn)
             signals = _compute_signals(g, conn, season)
 
-            # Predict using production model
-            feat_df = pd.DataFrame([feats])[FEATURE_NAMES].fillna(0)
+            # Predict using production model — resolve the schema it was trained on,
+            # since FEATURE_NAMES may have grown past what this pickle expects.
+            feat_df = pd.DataFrame([feats])[resolve_feature_names(model)].fillna(0)
             feat_scaled = scaler.transform(feat_df)
             home_win_prob = float(model.predict_proba(feat_scaled)[0][1])
 

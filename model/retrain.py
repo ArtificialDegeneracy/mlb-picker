@@ -35,7 +35,7 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import HIGH_CONFIDENCE_THRESHOLD, MEDIUM_CONFIDENCE_THRESHOLD, SEASON
-from model.features import FEATURE_NAMES, build_training_features
+from model.features import FEATURE_NAMES, build_training_features, resolve_feature_names
 
 MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(MODEL_DIR, "trained_model.pkl")
@@ -47,9 +47,13 @@ REPORT_PATH = os.path.join(MODEL_DIR, "retrain_report.json")
 ACCURACY_REGRESSION_LIMIT = 0.02  # 2 percentage points
 
 
-def _evaluate(model, scaler, val_feats, val_labels):
-    """Run a model on a validation set and return accuracy + tier breakdown."""
-    val_df = pd.DataFrame(val_feats)[FEATURE_NAMES].fillna(0)
+def _evaluate(model, scaler, val_feats, val_labels, feature_names=None):
+    """Run a model on a validation set and return accuracy + tier breakdown.
+
+    feature_names lets an older model be scored on the subset of columns it was
+    trained with, so the regression gate still works across a schema change.
+    """
+    val_df = pd.DataFrame(val_feats)[feature_names or FEATURE_NAMES].fillna(0)
     val_y = np.array(val_labels)
     val_X = scaler.transform(val_df)
     val_probs = model.predict_proba(val_X)[:, 1]
@@ -175,8 +179,17 @@ def main():
             prod_model = pickle.load(f)
         with open(SCALER_PATH, "rb") as f:
             prod_scaler = pickle.load(f)
+        # Score the incumbent on whatever schema IT was trained with. When features
+        # are added, the old columns are still a subset of the new vector, so the
+        # comparison stays fair and the gate keeps working — previously any schema
+        # change silently skipped the gate and auto-accepted the candidate.
+        prod_features = resolve_feature_names(prod_model)
+        if prod_features != FEATURE_NAMES:
+            print(f"\nProduction model uses the legacy {len(prod_features)}-feature schema; "
+                  f"scoring it on those columns so the gate still applies.")
         try:
-            baseline_metrics = _evaluate(prod_model, prod_scaler, holdout_feats, holdout_labels)
+            baseline_metrics = _evaluate(prod_model, prod_scaler, holdout_feats, holdout_labels,
+                                         feature_names=prod_features)
             print(f"\nProduction model on time-walked holdout ({len(holdout_feats)} games on/after {prod_cutoff_date}):")
             print(f"  Overall: {baseline_metrics['accuracy']:.1%}")
             delta = candidate_metrics["accuracy"] - baseline_metrics["accuracy"]
@@ -188,8 +201,8 @@ def main():
         except ValueError as e:
             if "feature names" in str(e).lower():
                 schema_mismatch = True
-                print(f"\nSkipping regression gate: production model has a different feature schema.")
-                print(f"  (FEATURE_NAMES has changed since the last retrain — accept candidate.)")
+                print(f"\nSkipping regression gate: production model schema could not be reconciled.")
+                print(f"  ({e})")
             else:
                 raise
 

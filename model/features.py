@@ -11,14 +11,52 @@ from db import get_db
 
 logger = logging.getLogger(__name__)
 
-# Feature names in order — must match what predict.py expects
-FEATURE_NAMES = [
+# The original 5-feature schema. Models trained before 2026-08-09 expect exactly
+# these, in this order. Kept so inference still works against an older pickle —
+# see resolve_feature_names().
+LEGACY_FEATURE_NAMES = [
     "fip_diff",            # home starter FIP - away starter FIP (negative = home advantage)
     "team_quality_diff",   # blended win% difference (home - away)
     "park_factor",         # park run environment (>1 = hitter friendly, <1 = pitcher friendly)
     "home_offense_trend",  # home team recent runs scored vs season avg (+ = hot, - = cold)
     "away_offense_trend",  # away team recent runs scored vs season avg
 ]
+
+# Threshold cutoffs for the signal features below. These are deliberately much
+# wider than the ones in compute_signals() (0.15 / 2.0), which exist only to feed
+# the away-overconfidence damping rule. Validated 2026-08-09 on 659 graded picks:
+# below these cutoffs the sign of the edge carries no information (a FIP gap under
+# 0.5 scored 46.1% vs 60.6% above it), which is exactly why these metrics failed as
+# plain linear terms — the signal is a step function, not a slope.
+BULLPEN_EDGE_THRESHOLD = 0.25   # ERA runs
+WRC_EDGE_THRESHOLD = 8.0        # wRC+ points
+FIP_GATE_THRESHOLD = 0.5        # FIP runs
+
+# Feature names in order — must match what predict.py expects.
+# The three trailing features were added 2026-08-09 and only become live once a
+# model is retrained on them; resolve_feature_names() keeps older pickles working.
+FEATURE_NAMES = LEGACY_FEATURE_NAMES + [
+    "bullpen_edge_sig",    # +1/0/-1: home bullpen ERA better/tied/worse by >0.25
+    "wrc_edge_sig",        # +1/0/-1: home wRC+ better/tied/worse by >8
+    "fip_diff_gated",      # fip_diff, zeroed when |fip_diff| < 0.5 (noise band)
+]
+
+
+def resolve_feature_names(model):
+    """Return the feature list a given trained model actually expects.
+
+    Lets a 5-feature pickle keep serving predictions after FEATURE_NAMES grew to 8,
+    so a schema change never requires a same-day retrain to avoid an outage.
+    """
+    n = getattr(model, "n_features_in_", None)
+    if n is None or n == len(FEATURE_NAMES):
+        return FEATURE_NAMES
+    if n == len(LEGACY_FEATURE_NAMES):
+        return LEGACY_FEATURE_NAMES
+    raise ValueError(
+        f"Trained model expects {n} features, which matches neither the current "
+        f"schema ({len(FEATURE_NAMES)}) nor the legacy one ({len(LEGACY_FEATURE_NAMES)})."
+    )
 
 
 def build_feature_vector(game_row, conn=None):
@@ -63,6 +101,40 @@ def build_feature_vector(game_row, conn=None):
         game_date = game_row["game_date"]
         features["home_offense_trend"] = _get_offense_trend(game_row["home_team"], game_date, conn)
         features["away_offense_trend"] = _get_offense_trend(game_row["away_team"], game_date, conn)
+
+        # 6-8. Threshold signal features (added 2026-08-09).
+        # All are signed toward HOME so they compose with the rest of the vector.
+        season = int(game_date[:4]) if game_date else SEASON
+
+        # 6. Bullpen edge — lower ERA is better, so home is favoured when away's is higher.
+        home_bp = _get_bullpen_era(game_row["home_team"], conn, season=season)
+        away_bp = _get_bullpen_era(game_row["away_team"], conn, season=season)
+        if home_bp is None or away_bp is None:
+            features["bullpen_edge_sig"] = 0.0
+        else:
+            gap = away_bp - home_bp
+            features["bullpen_edge_sig"] = (
+                1.0 if gap > BULLPEN_EDGE_THRESHOLD
+                else -1.0 if gap < -BULLPEN_EDGE_THRESHOLD
+                else 0.0
+            )
+
+        # 7. Offense edge — higher wRC+ is better.
+        home_wrc = _get_wrc_plus(game_row["home_team"], conn, season=season)
+        away_wrc = _get_wrc_plus(game_row["away_team"], conn, season=season)
+        if home_wrc is None or away_wrc is None:
+            features["wrc_edge_sig"] = 0.0
+        else:
+            gap = home_wrc - away_wrc
+            features["wrc_edge_sig"] = (
+                1.0 if gap > WRC_EDGE_THRESHOLD
+                else -1.0 if gap < -WRC_EDGE_THRESHOLD
+                else 0.0
+            )
+
+        # 8. FIP differential with the noise band zeroed out.
+        fd = features["fip_diff"]
+        features["fip_diff_gated"] = fd if abs(fd) >= FIP_GATE_THRESHOLD else 0.0
 
         return features
 
