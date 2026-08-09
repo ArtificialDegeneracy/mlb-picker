@@ -1,38 +1,29 @@
 {
-  "timestamp": "2026-07-30T20:34:56.675037",
+  "timestamp": "2026-08-09T10:20:01.160511",
   "action": "deployed",
   "season": 2026,
-  "training_set_size": 11312,
-  "holdout_size": 183,
-  "holdout_strategy": "time_walked",
-  "prod_cutoff_date": "2026-07-12",
+  "training_set_size": 11446,
+  "holdout_size": 347,
+  "holdout_strategy": "tail_split",
+  "prod_cutoff_date": "2026-08-09",
   "candidate_metrics": {
-    "accuracy": 0.5683060109289617,
-    "high_acc": 0.8,
-    "high_n": 10,
-    "med_acc": 0.5980392156862745,
-    "med_n": 102,
-    "lean_acc": 0.49295774647887325,
-    "lean_n": 71,
-    "brier": 0.24189268914613862
+    "accuracy": 0.5706051873198847,
+    "high_acc": 0.7142857142857143,
+    "high_n": 21,
+    "med_acc": 0.6231155778894473,
+    "med_n": 199,
+    "lean_acc": 0.4645669291338583,
+    "lean_n": 127,
+    "brier": 0.23912095125976857
   },
-  "production_metrics": {
-    "accuracy": 0.5737704918032787,
-    "high_acc": 0.8,
-    "high_n": 10,
-    "med_acc": 0.5980392156862745,
-    "med_n": 102,
-    "lean_acc": 0.5070422535211268,
-    "lean_n": 71,
-    "brier": 0.24186488524544433
-  },
-  "accuracy_delta": -0.005464480874316946,
+  "production_metrics": null,
+  "accuracy_delta": null,
   "coefficients": {
-    "fip_diff": -0.12276593553751529,
-    "team_quality_diff": 0.41923939650134956,
-    "park_factor": 0.03891033896545974,
-    "home_offense_trend": 0.024237804061286207,
-    "away_offense_trend": -0.0025297270971264226
+    "fip_diff": -0.12420914174601287,
+    "team_quality_diff": 0.41729296587716236,
+    "park_factor": 0.03645248518473226,
+    "home_offense_trend": 0.02640840634305726,
+    "away_offense_trend": -0.0031776090559877236
   },
   "regression_gate_limit": 0.02,
   "regression_blocked": false
