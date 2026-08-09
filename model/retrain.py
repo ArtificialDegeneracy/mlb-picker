@@ -42,9 +42,22 @@ MODEL_PATH = os.path.join(MODEL_DIR, "trained_model.pkl")
 SCALER_PATH = os.path.join(MODEL_DIR, "scaler.pkl")
 ARCHIVE_DIR = os.path.join(MODEL_DIR, "archive")
 REPORT_PATH = os.path.join(MODEL_DIR, "retrain_report.json")
+META_PATH = os.path.join(MODEL_DIR, "model_meta.json")
 
-# Validation gate: refuse to deploy if new model is meaningfully worse than the prior.
-ACCURACY_REGRESSION_LIMIT = 0.02  # 2 percentage points
+# Validation gate: refuse to deploy if the new model is meaningfully worse than the prior.
+#
+# Tightened 2026-08-09 from 0.02 when the retrain became capable of auto-deploying.
+# Be honest about what this can do: the time-walked holdout is one week of games
+# (~85-105), where the standard error on a win rate is ~5pp. A gate at this sample
+# size reliably catches GROSS failures — a broken feature pipeline, a scaler
+# mismatch, a label flip — and cannot resolve a subtle 1-2pp degradation. It is a
+# blast-radius limiter, not a quality bar.
+ACCURACY_REGRESSION_LIMIT = 0.01   # 1 percentage point
+BRIER_REGRESSION_LIMIT = 0.01      # accuracy alone is coarse; catch probability decay too
+
+# Auto-deploy requires enough holdout to have caught a gross failure at all. Below
+# this the retrain still opens a PR — it just won't ship without a human.
+MIN_HOLDOUT_FOR_AUTO_DEPLOY = 60
 
 
 def _evaluate(model, scaler, val_feats, val_labels, feature_names=None):
@@ -193,9 +206,17 @@ def main():
             print(f"\nProduction model on time-walked holdout ({len(holdout_feats)} games on/after {prod_cutoff_date}):")
             print(f"  Overall: {baseline_metrics['accuracy']:.1%}")
             delta = candidate_metrics["accuracy"] - baseline_metrics["accuracy"]
-            print(f"  Delta:   {delta:+.1%}")
+            brier_delta = candidate_metrics["brier"] - baseline_metrics["brier"]
+            print(f"  Delta:   {delta:+.1%} accuracy | {brier_delta:+.4f} Brier (lower is better)")
             if delta < -ACCURACY_REGRESSION_LIMIT:
-                print(f"\n  REGRESSION GATE: candidate is {abs(delta):.1%} worse than production.")
+                print(f"\n  REGRESSION GATE: candidate accuracy is {abs(delta):.1%} worse than production "
+                      f"(limit {ACCURACY_REGRESSION_LIMIT:.1%}).")
+                print(f"  Refusing to write new model files. Investigate before deploying.")
+                regression_blocked = True
+            elif brier_delta > BRIER_REGRESSION_LIMIT:
+                print(f"\n  REGRESSION GATE: candidate Brier is {brier_delta:+.4f} worse than production "
+                      f"(limit {BRIER_REGRESSION_LIMIT:.4f}) — probabilities decayed even though "
+                      f"accuracy held.")
                 print(f"  Refusing to write new model files. Investigate before deploying.")
                 regression_blocked = True
         except ValueError as e:
@@ -243,6 +264,33 @@ def main():
             pickle.dump(final_scaler, f)
         print(f"  Wrote {MODEL_PATH} and {SCALER_PATH} (prior versions archived to {ARCHIVE_DIR}/)")
 
+    # Auto-deploy eligibility. The gate can only catch gross failures at this sample
+    # size, so require that it actually had a fair chance to: a real time-walked
+    # comparison against the incumbent, on enough games to mean something.
+    auto_deploy_eligible = bool(
+        action == "deployed"
+        and used_time_walked
+        and baseline_metrics is not None
+        and len(holdout_feats) >= MIN_HOLDOUT_FOR_AUTO_DEPLOY
+        and not schema_mismatch
+    )
+    if action == "deployed":
+        if auto_deploy_eligible:
+            print(f"\nAuto-deploy: ELIGIBLE "
+                  f"(time-walked holdout of {len(holdout_feats)} games, gate applied and passed).")
+        else:
+            reasons = []
+            if not used_time_walked:
+                reasons.append("no time-walked holdout")
+            if baseline_metrics is None:
+                reasons.append("no incumbent to compare against")
+            if len(holdout_feats) < MIN_HOLDOUT_FOR_AUTO_DEPLOY:
+                reasons.append(f"holdout {len(holdout_feats)} < {MIN_HOLDOUT_FOR_AUTO_DEPLOY}")
+            if schema_mismatch:
+                reasons.append("schema mismatch — gate skipped")
+            print(f"\nAuto-deploy: NOT eligible ({'; '.join(reasons)}). "
+                  f"Opening a PR for human review instead.")
+
     # Write report regardless of action — useful for PR description / audit trail
     report = {
         "timestamp": datetime.now().isoformat(),
@@ -258,13 +306,32 @@ def main():
             candidate_metrics["accuracy"] - baseline_metrics["accuracy"]
             if baseline_metrics else None
         ),
+        "brier_delta": (
+            candidate_metrics["brier"] - baseline_metrics["brier"]
+            if baseline_metrics else None
+        ),
         "coefficients": coefficients,
         "regression_gate_limit": ACCURACY_REGRESSION_LIMIT,
+        "brier_gate_limit": BRIER_REGRESSION_LIMIT,
         "regression_blocked": regression_blocked,
+        "auto_deploy_eligible": auto_deploy_eligible,
     }
     with open(REPORT_PATH, "w") as f:
         json.dump(report, f, indent=2)
     print(f"\nReport written to {REPORT_PATH}")
+
+    # Ship a small metadata file alongside the model so downstream runs can tell how
+    # old the DEPLOYED model is. Artifact download resets file mtimes, so the pkl's
+    # own timestamp is useless for this — the training date has to travel with it.
+    if action == "deployed":
+        with open(META_PATH, "w") as f:
+            json.dump({
+                "trained_at": datetime.now().isoformat(),
+                "training_set_size": len(all_feats),
+                "feature_names": FEATURE_NAMES,
+                "auto_deploy_eligible": auto_deploy_eligible,
+            }, f, indent=2)
+        print(f"Model metadata written to {META_PATH}")
 
     if regression_blocked:
         sys.exit(2)  # Distinct exit code so the workflow can detect this case

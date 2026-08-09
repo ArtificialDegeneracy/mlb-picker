@@ -71,10 +71,14 @@ jobs:
             ACCURACY=$(python3 -c "import json; r=json.load(open('model/retrain_report.json')); print(f\"{r['candidate_metrics']['accuracy']:.3f}\")")
             DELTA=$(python3 -c "import json; r=json.load(open('model/retrain_report.json')); d=r.get('accuracy_delta'); print(f\"{d:+.3f}\" if d is not None else 'n/a')")
             BLOCKED=$(python3 -c "import json; print(json.load(open('model/retrain_report.json')).get('regression_blocked', False))")
+            AUTODEPLOY=$(python3 -c "import json; print(json.load(open('model/retrain_report.json')).get('auto_deploy_eligible', False))")
+            HOLDOUT=$(python3 -c "import json; print(json.load(open('model/retrain_report.json')).get('holdout_size', 0))")
             echo "action=$ACTION" >> $GITHUB_OUTPUT
             echo "accuracy=$ACCURACY" >> $GITHUB_OUTPUT
             echo "delta=$DELTA" >> $GITHUB_OUTPUT
             echo "blocked=$BLOCKED" >> $GITHUB_OUTPUT
+            echo "autodeploy=$AUTODEPLOY" >> $GITHUB_OUTPUT
+            echo "holdout=$HOLDOUT" >> $GITHUB_OUTPUT
           fi
 
       - name: Fail if regression-blocked
@@ -82,6 +86,35 @@ jobs:
         run: |
           echo "::error::Retrain blocked by regression gate. New candidate model was meaningfully worse than production. See report above."
           exit 1
+
+      # Deploy by publishing the model artifact directly. daily-picks restores the
+      # model from `mlb-picker-model`, so the next scheduled run picks this up with
+      # no merge and no manual dispatch. This is the actual deploy step — the PR
+      # below is an audit trail and rollback point, not the delivery mechanism.
+      #
+      # Before 2026-08-09 shipping a model required merging the PR AND dispatching
+      # daily-picks with force_seed_model=true. Neither was automated, so nine
+      # consecutive retrains trained on fresh data and were never deployed.
+      - name: Deploy model (publish artifact)
+        if: steps.report.outputs.autodeploy == 'True' && inputs.dry_run != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlb-picker-model
+          path: |
+            model/trained_model.pkl
+            model/scaler.pkl
+            model/model_meta.json
+          retention-days: 90
+          overwrite: true
+
+      - name: Report deploy decision
+        if: inputs.dry_run != 'true'
+        run: |
+          if [ "${{ steps.report.outputs.autodeploy }}" = "True" ]; then
+            echo "::notice::Model DEPLOYED — artifact mlb-picker-model updated. The next daily-picks run will use it. Rollback: re-dispatch daily-picks with force_seed_model=true after reverting the retrain PR on main."
+          elif [ "${{ steps.report.outputs.action }}" = "deployed" ]; then
+            echo "::warning::Model trained and committed to a PR but NOT auto-deployed (holdout=${{ steps.report.outputs.holdout }} games). Review the PR and deploy manually with force_seed_model=true."
+          fi
 
       - name: Open PR with new model
         if: steps.report.outputs.action == 'deployed' && inputs.dry_run != 'true'
@@ -96,7 +129,8 @@ jobs:
           # -f because model/retrain_report.json and model/archive/ are gitignored
           # locally (avoids noise in local git status) but we want them in the PR
           # for the audit trail and rollback safety.
-          git add -f model/trained_model.pkl model/scaler.pkl model/archive/ model/retrain_report.json
+          git add -f model/trained_model.pkl model/scaler.pkl model/archive/ \
+                     model/retrain_report.json model/model_meta.json
           git commit -m "Weekly retrain: ${DATE_TAG}
 
           Candidate accuracy: ${{ steps.report.outputs.accuracy }}
@@ -123,12 +157,16 @@ jobs:
 
           ## Deploying
 
-          Merging this PR does NOT deploy the model by itself — daily runs restore the model from the GitHub Actions artifact, not from main. After merging, dispatch the **MLB Daily Picks** workflow with \`force_seed_model=true\`: it restores the DB from the artifact as normal but uses the \`model/*.pkl\` files committed by this PR, so pick history is never touched.
+          **Auto-deploy eligible: \`${{ steps.report.outputs.autodeploy }}\`** (holdout ${{ steps.report.outputs.holdout }} games)
+
+          - If \`True\`: this model is **already live**. The workflow published it to the \`mlb-picker-model\` artifact and the next scheduled daily-picks run will use it. This PR is the audit trail and rollback point — merge it to keep main in sync with what is deployed.
+          - If \`False\`: the model was trained but NOT deployed (insufficient holdout to validate). Merge this PR, then dispatch **MLB Daily Picks** with \`force_seed_model=true\`.
 
           ## Safety
 
           - Prior model is archived in \`model/archive/\`
-          - Regression gate (>2% drop vs production) was NOT triggered
+          - Regression gate: accuracy within ${{ steps.report.outputs.delta }} of production, Brier also checked. NOT triggered.
+          - Gate scope: the holdout is roughly one week of games, where the standard error is ~5pp. It reliably catches gross failures (broken feature pipeline, scaler mismatch, label flip); it cannot resolve a subtle 1-2pp degradation.
           - To roll back: revert this PR on main, then re-dispatch daily-picks with \`force_seed_model=true\`
           - Never deploy a model with \`force_seed=true\` — it resets the cloud DB to \`seed/\` and erases pick history (see the 2026-06-13 incident in CLAUDE.md)
 

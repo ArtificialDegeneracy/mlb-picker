@@ -176,6 +176,32 @@ jobs:
             python3 migrate.py mlb_picker.db
           fi
 
+      # Staleness alarm. Between 2026-06-14 and 2026-08-09 nine consecutive retrains
+      # succeeded and none reached production, because deploying required two manual
+      # steps that nobody took. Nothing surfaced that. This does.
+      # Reads model_meta.json (published with the model artifact) rather than the
+      # pkl mtime, which artifact download resets.
+      - name: Check deployed model freshness
+        run: |
+          if [ ! -f model/model_meta.json ]; then
+            echo "::warning::No model/model_meta.json — the deployed model predates freshness tracking. It will appear on the next retrain."
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, sys
+          from datetime import datetime
+          meta = json.load(open("model/model_meta.json"))
+          trained = datetime.fromisoformat(meta["trained_at"])
+          age = (datetime.now() - trained).days
+          print(f"Deployed model trained {trained:%Y-%m-%d} ({age} days ago), "
+                f"{meta.get('training_set_size','?')} games, "
+                f"{len(meta.get('feature_names', []))} features")
+          if age > 14:
+              print(f"::warning::Deployed model is {age} days old. Weekly retrain should keep "
+                    f"this under 8 — check whether the retrain workflow is failing or its "
+                    f"auto-deploy is being skipped.")
+          PY
+
       - name: Determine run mode
         id: mode
         run: |
