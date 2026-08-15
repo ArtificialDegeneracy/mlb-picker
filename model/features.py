@@ -32,30 +32,57 @@ BULLPEN_EDGE_THRESHOLD = 0.25   # ERA runs
 WRC_EDGE_THRESHOLD = 8.0        # wRC+ points
 FIP_GATE_THRESHOLD = 0.5        # FIP runs
 
-# Feature names in order — must match what predict.py expects.
-# The three trailing features were added 2026-08-09 and only become live once a
-# model is retrained on them; resolve_feature_names() keeps older pickles working.
-FEATURE_NAMES = LEGACY_FEATURE_NAMES + [
+# The 8-feature schema trained and deployed on 2026-08-15. Retained ONLY so that
+# model keeps serving until a 5-feature retrain replaces it — not trained on any more.
+EXPERIMENTAL_FEATURE_NAMES = LEGACY_FEATURE_NAMES + [
     "bullpen_edge_sig",    # +1/0/-1: home bullpen ERA better/tied/worse by >0.25
     "wrc_edge_sig",        # +1/0/-1: home wRC+ better/tied/worse by >8
     "fip_diff_gated",      # fip_diff, zeroed when |fip_diff| < 0.5 (noise band)
 ]
 
+# Feature names to TRAIN on. Reverted to the legacy five on 2026-08-15 after an
+# ablation on a 138-game time-walked holdout found none of the three additions
+# earns its place:
+#
+#   5 legacy (baseline)       55.8%   Brier 0.2401
+#   5 + fip_diff_gated        54.3%   Brier 0.2401
+#   5 + bullpen_edge_sig      55.1%   Brier 0.2402
+#   5 + wrc_edge_sig          56.5%   Brier 0.2403
+#   all 8                     55.1%   Brier 0.2403
+#
+# Every variant sits inside a ±4.3pp standard error, so nothing here is resolvable
+# — but the baseline is the best point estimate, Brier is flat to four decimals,
+# and the cloud run agreed independently (8-feature vs 5-feature on a larger
+# 212-game holdout: delta +0.0%). Two signals ties go to the simpler model.
+#
+# The three features are still COMPUTED by build_feature_vector, because they work
+# well as post-model bet-selection filters even though they add nothing as model
+# inputs. That distinction is the whole finding: a signal that helps you choose
+# WHICH games to bet is not the same as one that improves P(win) on every game.
+FEATURE_NAMES = LEGACY_FEATURE_NAMES
+
+# Every schema a persisted model might have been trained on, newest first. Length is
+# the discriminator, so these must stay distinct in length.
+KNOWN_FEATURE_SCHEMAS = [LEGACY_FEATURE_NAMES, EXPERIMENTAL_FEATURE_NAMES]
+
 
 def resolve_feature_names(model):
     """Return the feature list a given trained model actually expects.
 
-    Lets a 5-feature pickle keep serving predictions after FEATURE_NAMES grew to 8,
-    so a schema change never requires a same-day retrain to avoid an outage.
+    Inference is served from whichever schema the pickle was trained on, so changing
+    FEATURE_NAMES never requires a same-day retrain to avoid an outage — in either
+    direction. This matters right now: the deployed model is the 8-feature one and
+    FEATURE_NAMES has gone back to 5, so the two differ until the next retrain.
     """
     n = getattr(model, "n_features_in_", None)
-    if n is None or n == len(FEATURE_NAMES):
+    if n is None:
         return FEATURE_NAMES
-    if n == len(LEGACY_FEATURE_NAMES):
-        return LEGACY_FEATURE_NAMES
+    for schema in KNOWN_FEATURE_SCHEMAS:
+        if n == len(schema):
+            return schema
     raise ValueError(
-        f"Trained model expects {n} features, which matches neither the current "
-        f"schema ({len(FEATURE_NAMES)}) nor the legacy one ({len(LEGACY_FEATURE_NAMES)})."
+        f"Trained model expects {n} features, which matches no known schema "
+        f"({', '.join(str(len(s)) for s in KNOWN_FEATURE_SCHEMAS)})."
     )
 
 
