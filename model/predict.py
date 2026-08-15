@@ -16,7 +16,7 @@ from config import HIGH_CONFIDENCE_THRESHOLD, MEDIUM_CONFIDENCE_THRESHOLD, SEASO
 from db import get_db
 from model.features import (
     build_training_features, build_feature_vector, FEATURE_NAMES,
-    compute_signals, away_overconfidence_damping,
+    compute_signals, away_overconfidence_damping, resolve_feature_names,
 )
 
 logger = logging.getLogger(__name__)
@@ -181,15 +181,18 @@ def predict_games(date_str, run_type="morning"):
             return []
 
         picks = []
+        model_features = resolve_feature_names(model)
         for game in games:
             feats = build_feature_vector(game, conn)
             if feats is None:
                 continue
 
-            feat_df = pd.DataFrame([feats])[FEATURE_NAMES].fillna(0)
+            feat_df = pd.DataFrame([feats])[model_features].fillna(0)
             feat_scaled = scaler.transform(feat_df)
 
             home_win_prob = model.predict_proba(feat_scaled)[0][1]
+            # Snapshot the model's own output before the calibration stack touches it.
+            raw_model_prob = home_win_prob
 
             # Detect opener/spot starter situation
             home_opener = _is_probable_opener(game["home_starter_id"], conn)
@@ -264,11 +267,13 @@ def predict_games(date_str, run_type="morning"):
             # Save to DB
             conn.execute("""
                 INSERT OR REPLACE INTO picks
-                (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence, opener_flag, pick_flipped)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (game_id, pick_date, run_type, predicted_winner, home_win_prob, confidence,
+                 opener_flag, pick_flipped, raw_model_prob)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 game["game_id"], date_str, run_type,
                 predicted_winner, round(home_win_prob, 4), confidence, opener_flag, pick_flipped,
+                round(raw_model_prob, 4),
             ))
 
         # Sort by confidence level then probability
