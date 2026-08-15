@@ -117,13 +117,37 @@ def main():
     # production model was trained on data through its commit date — which included
     # those games — so the regression gate was comparing candidate-on-holdout vs
     # production-on-training-data and the gate fired (1-2pp lower) every time.
-    # mtime of the model file approximates its training cutoff.
+    # Determining that cutoff is the tricky part. File mtime was the original proxy,
+    # but `git checkout` stamps every file with the checkout time — so in CI the
+    # cutoff always resolved to "today", no games fell after it, and the run silently
+    # fell back to a tail split with the gate skipped. Verified against the
+    # 2026-08-09 and 2026-08-15 cloud runs: the gate has never actually executed
+    # there, which made every "regression gate NOT triggered" line in a retrain PR
+    # vacuously true. Local runs looked fine because local mtimes are real.
+    #
+    # model_meta.json carries the true training date with the model, so prefer it and
+    # treat mtime as a last resort that we warn loudly about.
     prod_cutoff_date = None
     used_time_walked = False
-    if os.path.exists(MODEL_PATH):
+    cutoff_source = None
+    if os.path.exists(META_PATH):
+        try:
+            with open(META_PATH) as f:
+                _meta = json.load(f)
+            prod_cutoff_date = _meta["trained_at"][:10]
+            cutoff_source = "model_meta.json"
+            print(f"  Production model trained_at: {prod_cutoff_date} (from model_meta.json)")
+        except (KeyError, ValueError, OSError) as e:
+            print(f"  WARNING: model_meta.json unreadable ({e}) — falling back to mtime.")
+    if prod_cutoff_date is None and os.path.exists(MODEL_PATH):
         mtime = datetime.fromtimestamp(os.path.getmtime(MODEL_PATH))
         prod_cutoff_date = mtime.strftime("%Y-%m-%d")
+        cutoff_source = "mtime"
         print(f"  Production model file mtime: {prod_cutoff_date} (used as time-walked cutoff)")
+        print(f"  WARNING: no model_meta.json, so this is the file's mtime. Under a fresh "
+              f"git checkout that is the CHECKOUT time, not the training date — which "
+              f"collapses the time-walked window and skips the regression gate. The next "
+              f"deployed model will carry model_meta.json and fix this.")
 
     if prod_cutoff_date and any(d >= prod_cutoff_date for d in current_dates):
         # Validation = games on or after production's cutoff. Both models can be
@@ -300,6 +324,7 @@ def main():
         "holdout_size": len(holdout_feats),
         "holdout_strategy": "time_walked" if used_time_walked else "tail_split",
         "prod_cutoff_date": prod_cutoff_date,
+        "prod_cutoff_source": cutoff_source,
         "candidate_metrics": candidate_metrics,
         "production_metrics": baseline_metrics,
         "accuracy_delta": (
