@@ -1,0 +1,14 @@
+{
+  "trained_at": "2026-07-30T20:34:56.675037",
+  "training_set_size": 11312,
+  "feature_names": [
+    "fip_diff",
+    "team_quality_diff",
+    "park_factor",
+    "home_offense_trend",
+    "away_offense_trend"
+  ],
+  "auto_deploy_eligible": false,
+  "backfilled": true,
+  "backfill_note": "Reconstructed 2026-08-15 from model/retrain_report.json at commit 3af952f (the retrain that produced this pkl). Needed because file mtime is reset by git checkout, which collapsed the time-walked window and silently skipped the regression gate in every cloud run."
+}
