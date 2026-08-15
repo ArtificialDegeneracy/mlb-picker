@@ -1,0 +1,15 @@
+{
+  "trained_at": "2026-08-15T13:24:56.848913",
+  "training_set_size": 11524,
+  "feature_names": [
+    "fip_diff",
+    "team_quality_diff",
+    "park_factor",
+    "home_offense_trend",
+    "away_offense_trend",
+    "bullpen_edge_sig",
+    "wrc_edge_sig",
+    "fip_diff_gated"
+  ],
+  "auto_deploy_eligible": false
+}
